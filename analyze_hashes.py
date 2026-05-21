@@ -47,6 +47,7 @@ def parse_args():
     parser.add_argument('--high-value', help="(OPTIONAL) File containing high value groups/OUs")
     parser.add_argument('--enabled-only', action='store_true', help="(OPTIONAL) Show only 'enabled' users (IGNORE IF NO BLOODHOUND)")
     parser.add_argument('--redact', action='store_true', help="(OPTIONAL) Redact the passwords and hashes in reports")
+    parser.add_argument('--outdir', help="(OPTIONAL) Directory to output HTML reports to. Defaults to report_<timestamp>")
 
     return parser.parse_args()
 
@@ -70,8 +71,14 @@ def parse_potfile(potfile_path: str) -> Dict[str, str]:
 def parse_ntds(ntds_path: str, cracked: Dict[str, str]) -> Dict[str, UserData]:
     """Parses NTDS dump, skips krbtgt/machine accounts, returns dict mapped by domain\\username."""
     users: Dict[str, UserData] = {}
+    logging.info(f"Parsing NTDS file: {ntds_path}")
+    count = 0
     with open(ntds_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
+            count += 1
+            if count % 100000 == 0:
+                logging.info(f"Processed {count} lines from NTDS...")
+
             line = line.strip()
             if not line:
                 continue
@@ -125,7 +132,15 @@ def parse_ntds(ntds_path: str, cracked: Dict[str, str]) -> Dict[str, UserData]:
 
 def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
     """Parses bloodhound users JSON and group memberships."""
+    # Pre-compute username fallback index to avoid O(N^2) lookups
+    fallback_index = {}
+    for k in users.keys():
+        parts = k.split('\\')
+        if len(parts) > 1:
+            fallback_index[parts[1].lower()] = k
+
     for bh_file in bh_files:
+        logging.info(f"Parsing Bloodhound file: {bh_file}")
         with open(bh_file, 'r', encoding='utf-8') as f:
             try:
                 data = json.load(f)
@@ -136,7 +151,11 @@ def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
             if 'data' not in data:
                 continue
 
-            for item in data['data']:
+            total_items = len(data['data'])
+            for i, item in enumerate(data['data']):
+                if (i + 1) % 10000 == 0:
+                    logging.info(f"Processed {i + 1}/{total_items} items from {bh_file}...")
+
                 item_type = item.get('type', item.get('Type', '')).upper()
                 props = item.get('Properties', {})
 
@@ -151,9 +170,9 @@ def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
                     # Check if we have this user from NTDS
                     matched_user = users.get(key)
                     if not matched_user:
-                        fallback_keys = [k for k in users.keys() if k.split('\\')[1].lower() == samaccountname.lower()]
-                        if len(fallback_keys) == 1:
-                            matched_user = users[fallback_keys[0]]
+                        fallback_key = fallback_index.get(samaccountname.lower())
+                        if fallback_key:
+                            matched_user = users.get(fallback_key)
 
                     if matched_user:
                         matched_user.enabled = props.get('enabled', True)
@@ -177,9 +196,9 @@ def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
                                 u_key = f"{m_dom}\\{m_user}".lower()
                                 matched = users.get(u_key)
                                 if not matched:
-                                    f_keys = [k for k in users.keys() if k.split('\\')[1].lower() == m_user.lower()]
-                                    if len(f_keys) == 1:
-                                        matched = users[f_keys[0]]
+                                    fallback_key = fallback_index.get(m_user.lower())
+                                    if fallback_key:
+                                        matched = users.get(fallback_key)
                                 if matched and group_name:
                                     matched.groups.add(group_name)
 
@@ -233,7 +252,8 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
         'shared_passwords': {}, # mapping of nt_hash -> list of users
         'pwdneverexpires': [],
         'passwordnotreqd': [],
-        'password_lengths': {}
+        'password_lengths': {},
+        'enabled_only_flag': enabled_only
     }
 
     # Pre-filter accounts
@@ -244,8 +264,12 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
         active_users.append(user)
 
     metrics['total_accounts'] = len(active_users)
+    logging.info(f"Calculating metrics for {len(active_users)} active users...")
 
-    for user in active_users:
+    for i, user in enumerate(active_users):
+        if (i + 1) % 10000 == 0:
+            logging.info(f"Calculated metrics for {i + 1}/{len(active_users)} users...")
+
         current_hash = user.current_hash
         if not current_hash:
             continue
@@ -257,20 +281,19 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
         # We process based on the current hash
 
         # Kerberoastable/ASREPRoastable
-        if user.kerberoastable and current_hash.cracked_password:
+        if user.kerberoastable and current_hash.cracked_password and user.enabled:
             metrics['kerberoastable_cracked'].append(user)
-        if user.asreproastable and current_hash.cracked_password:
+        if user.asreproastable and current_hash.cracked_password and user.enabled:
             metrics['asreproastable_cracked'].append(user)
 
         # High value targets
-        # Assuming for now bloodhound might populate user.groups, but we check if they are in the lists
         is_high_value = False
+        high_value_groups_lower = [g.lower() for g in high_value_groups]
         for grp in user.groups:
-            if grp in high_value_groups:
+            if grp.lower() in high_value_groups_lower:
                 is_high_value = True
                 break
-        # Fallback if no bloodhound groups are parsed but we want to simulate or check
-        # In a real scenario we'd need full group resolution. We'll mark them if they match.
+
         if is_high_value and current_hash.cracked_password:
             metrics['high_value_cracked'].append(user)
 
@@ -292,8 +315,10 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
             fgpp_policies = policy.get('fgpp', {})
 
             # Check for FGPP matching user's groups
+            # Use lowercase for case-insensitive matching
+            user_groups_lower = [g.lower() for g in user.groups]
             for group, g_policy in fgpp_policies.items():
-                if group in user.groups:
+                if group.lower() in user_groups_lower:
                     applicable_policy = g_policy
                     break
 
@@ -339,8 +364,18 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
 
     return metrics
 
-def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool, output_file: str = "report.html"):
-    html_template = """<!DOCTYPE html>
+import os
+import time
+
+def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool, output_dir: Optional[str] = None):
+    if not output_dir:
+        timestamp = int(time.time())
+        output_dir = f"report_{timestamp}"
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    base_html_template = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -358,6 +393,9 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
     .bar {{ background: #5cb85c; width: 30px; text-align: center; color: white; font-size: 10px; border-radius: 3px 3px 0 0; }}
     .bar-label {{ margin-top: 5px; font-size: 12px; }}
     input[type="text"] {{ padding: 5px; margin-bottom: 10px; width: 100%; max-width: 300px; }}
+    nav {{ background: #fff; padding: 10px; margin-bottom: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
+    nav a {{ margin-right: 15px; text-decoration: none; color: #337ab7; font-weight: bold; }}
+    nav a:hover {{ text-decoration: underline; }}
 </style>
 <script>
     function filterTable(inputId, tableId) {{
@@ -383,40 +421,20 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
 </script>
 </head>
 <body>
-    <h1>Password Analysis Report</h1>
+    <nav>
+        <a href="index.html">Summary</a>
+        <a href="shared.html">Shared Passwords</a>
+        <a href="lm_hashes.html">LM Hashes</a>
+        <a href="policy.html">Policy Violations</a>
+        <a href="high_value.html">High Value</a>
+        <a href="kerberoastable.html">Kerberoastable</a>
+        <a href="asreproastable.html">ASREPRoastable</a>
+        <a href="flags.html">Account Flags</a>
+        <a href="history.html">Password History</a>
+    </nav>
+    <h1>Password Analysis Report: {page_title}</h1>
 
-    <div class="card">
-        <h2>Summary Metrics</h2>
-        <p>Total Evaluated Accounts: <span class="metric">{total_accounts}</span></p>
-        <p>Total Passwords: {total_passwords} | Total Cracked: <span class="metric">{total_cracked}</span></p>
-        <p>Unique Passwords: {unique_passwords} | Unique Cracked: <span class="metric">{unique_cracked}</span></p>
-        <p>Kerberoastable & Cracked: <span class="metric">{kerb_cracked}</span></p>
-        <p>ASREPRoastable & Cracked: <span class="metric">{asrep_cracked}</span></p>
-        <p>High Value Accounts Cracked: <span class="metric">{high_val_cracked}</span></p>
-        <p>Accounts with Password Not Required: <span class="metric">{pwd_not_req}</span></p>
-        <p>Accounts with Password Never Expires: <span class="metric">{pwd_never_exp}</span></p>
-        <p>Accounts with LM Hashes: <span class="metric">{lm_hashes_count}</span></p>
-        <p>Accounts Sharing Passwords: <span class="metric">{shared_count}</span></p>
-        <p>Accounts with Policy Violations: <span class="metric">{policy_violations_count}</span></p>
-    </div>
-
-    <div class="card">
-        <h2>Password Length Distribution</h2>
-        <div class="bar-chart">
-            {length_bars}
-        </div>
-    </div>
-
-    {tables_html}
-
-    <div class="card">
-        <h2>User Password History</h2>
-        <input type="text" id="histFilter" onkeyup="filterTable('histFilter', 'histTable')" placeholder="Filter by Domain or Username...">
-        <table id="histTable">
-            <tr><th>Domain</th><th>Username</th><th>NT Hash</th><th>Cracked Password</th><th>Is History</th></tr>
-            {history_rows}
-        </table>
-    </div>
+    {content}
 
 </body>
 </html>"""
@@ -441,10 +459,16 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
             return ""
         return redact_string(h_str) if redact else h_str
 
+    def write_page(filename, title, content):
+        path = os.path.join(output_dir, filename)
+        final_html = base_html_template.format(page_title=title, content=content)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(final_html)
+
     # Helper to generate tables
     def generate_table(title, table_id, headers, rows):
         if not rows:
-            return ""
+            return f'<div class="card"><h2>{title}</h2><p>No data available.</p></div>'
         table_html = f'<div class="card"><h2>{title}</h2>'
         table_html += f'<input type="text" id="{table_id}Filter" onkeyup="filterTable(\'{table_id}Filter\', \'{table_id}\')" placeholder="Filter...">'
         table_html += f'<table id="{table_id}"><tr>'
@@ -460,80 +484,129 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
         table_html += '</table></div>'
         return table_html
 
-    tables_html = ""
+    shared_count = sum(len(u_list) for u_list in metrics['shared_passwords'].values())
 
-    # Shared Passwords
+    # --- Index Page ---
+    index_content = f"""
+    <div class="card">
+        <h2>Summary Metrics</h2>
+        <p>Total Evaluated Accounts: <span class="metric">{metrics['total_accounts']}</span></p>
+        <p>Total Passwords: {metrics['total_passwords']} | Total Cracked: <span class="metric">{metrics['total_cracked']}</span></p>
+        <p>Unique Passwords: {len(metrics['unique_passwords'])} | Unique Cracked: <span class="metric">{len(metrics['unique_cracked'])}</span></p>
+        <p>Kerberoastable & Cracked: <span class="metric">{len(metrics['kerberoastable_cracked'])}</span></p>
+        <p>ASREPRoastable & Cracked: <span class="metric">{len(metrics['asreproastable_cracked'])}</span></p>
+        <p>High Value Accounts Cracked: <span class="metric">{len(metrics['high_value_cracked'])}</span></p>
+        <p>Accounts with Password Not Required: <span class="metric">{len(metrics['passwordnotreqd'])}</span></p>
+        <p>Accounts with Password Never Expires: <span class="metric">{len(metrics['pwdneverexpires'])}</span></p>
+        <p>Accounts with LM Hashes: <span class="metric">{len(metrics['lm_hashes'])}</span></p>
+        <p>Accounts Sharing Passwords: <span class="metric">{shared_count}</span></p>
+        <p>Accounts with Policy Violations: <span class="metric">{len(metrics['policy_violations'])}</span></p>
+    </div>
+
+    <div class="card">
+        <h2>Password Length Distribution</h2>
+        <div class="bar-chart">
+            {bars_html}
+        </div>
+    </div>
+    """
+    write_page("index.html", "Summary", index_content)
+
+    # --- Shared Passwords Page ---
     shared_rows = []
     for nt_hash, user_list in metrics['shared_passwords'].items():
         for u in user_list:
             shared_rows.append([u.domain, u.username, get_pwd_display(u)])
-    tables_html += generate_table("Shared Passwords", "sharedTable", ["Domain", "Username", "Password"], shared_rows)
+    write_page("shared.html", "Shared Passwords", generate_table("Shared Passwords", "sharedTable", ["Domain", "Username", "Password"], shared_rows))
 
-    # LM Hashes
+    # --- LM Hashes Page ---
     lm_rows = [[u.domain, u.username, get_hash_display(u.current_hash.lm_hash)] for u in metrics['lm_hashes']]
-    tables_html += generate_table("Accounts with LM Hashes", "lmTable", ["Domain", "Username", "LM Hash"], lm_rows)
+    write_page("lm_hashes.html", "Accounts with LM Hashes", generate_table("Accounts with LM Hashes", "lmTable", ["Domain", "Username", "LM Hash"], lm_rows))
 
-    # Policy Violations
+    # --- Policy Violations Page ---
     pv_rows = [[item['user'].domain, item['user'].username, get_pwd_display(item['user']), item['reason']] for item in metrics['policy_violations']]
-    tables_html += generate_table("Policy Violations", "pvTable", ["Domain", "Username", "Password", "Reason"], pv_rows)
+    write_page("policy.html", "Policy Violations", generate_table("Policy Violations", "pvTable", ["Domain", "Username", "Password", "Reason"], pv_rows))
 
-    # High Value Cracked
+    # --- High Value Page ---
     hvc_rows = [[u.domain, u.username, get_pwd_display(u)] for u in metrics['high_value_cracked']]
-    tables_html += generate_table("High Value Accounts Cracked", "hvcTable", ["Domain", "Username", "Password"], hvc_rows)
+    write_page("high_value.html", "High Value Accounts", generate_table("High Value Accounts Cracked", "hvcTable", ["Domain", "Username", "Password"], hvc_rows))
 
-    # Kerberoastable Cracked
+    # --- Kerberoastable Page ---
     kc_rows = [[u.domain, u.username, get_pwd_display(u)] for u in metrics['kerberoastable_cracked']]
-    tables_html += generate_table("Kerberoastable & Cracked", "kcTable", ["Domain", "Username", "Password"], kc_rows)
+    write_page("kerberoastable.html", "Kerberoastable", generate_table("Kerberoastable & Cracked", "kcTable", ["Domain", "Username", "Password"], kc_rows))
 
-    # ASREPRoastable Cracked
+    # --- ASREPRoastable Page ---
     ac_rows = [[u.domain, u.username, get_pwd_display(u)] for u in metrics['asreproastable_cracked']]
-    tables_html += generate_table("ASREPRoastable & Cracked", "acTable", ["Domain", "Username", "Password"], ac_rows)
+    write_page("asreproastable.html", "ASREPRoastable", generate_table("ASREPRoastable & Cracked", "acTable", ["Domain", "Username", "Password"], ac_rows))
 
-    # Flags
+    # --- Flags Page ---
     pne_rows = [[u.domain, u.username] for u in metrics['pwdneverexpires']]
-    tables_html += generate_table("Password Never Expires", "pneTable", ["Domain", "Username"], pne_rows)
+    flags_content = generate_table("Password Never Expires", "pneTable", ["Domain", "Username"], pne_rows)
     pnr_rows = [[u.domain, u.username] for u in metrics['passwordnotreqd']]
-    tables_html += generate_table("Password Not Required", "pnrTable", ["Domain", "Username"], pnr_rows)
+    flags_content += generate_table("Password Not Required", "pnrTable", ["Domain", "Username"], pnr_rows)
+    write_page("flags.html", "Account Flags", flags_content)
 
-    # History Table
+    # --- History Page ---
+    # Find max history length
+    max_history = 0
+    for key, user in users.items():
+        if metrics.get('enabled_only_flag') and not user.enabled:
+            continue
+        hist_hashes = [h for h in user.hashes if h.is_history]
+        if len(hist_hashes) > max_history:
+            max_history = len(hist_hashes)
+
+    # Generate headers
+    history_headers = "<tr><th>Domain</th><th>Username</th><th>Current</th>"
+    for i in range(1, max_history + 1):
+        history_headers += f"<th>History {i}</th>"
+    history_headers += "</tr>"
+
     history_rows = ""
     for key, user in users.items():
-        for h in user.hashes:
-            # When redacting history hashes, we need to redact explicitly since we might not have run redact_string on history hashes in metrics calc
-            if redact and h.cracked_password:
-                display_pwd = redact_string(h.cracked_password)
+        if metrics.get('enabled_only_flag') and not user.enabled:
+            continue
+
+        e_dom = html.escape(user.domain)
+        e_usr = html.escape(user.username)
+
+        # Current hash
+        curr_hash = user.current_hash
+        curr_display = ""
+        if curr_hash and curr_hash.cracked_password:
+            curr_display = redact_string(curr_hash.cracked_password) if redact else curr_hash.cracked_password
+        curr_display = html.escape(curr_display)
+
+        row_html = f"<tr><td>{e_dom}</td><td>{e_usr}</td><td>{curr_display}</td>"
+
+        hist_hashes = [h for h in user.hashes if h.is_history]
+        # Depending on NTDS extraction, they might not be perfectly ordered, but we append them in sequence
+        for i in range(max_history):
+            if i < len(hist_hashes):
+                h = hist_hashes[i]
+                h_display = ""
+                if h.cracked_password:
+                    h_display = redact_string(h.cracked_password) if redact else h.cracked_password
+                row_html += f"<td>{html.escape(h_display)}</td>"
             else:
-                display_pwd = h.cracked_password
-            e_dom = html.escape(user.domain)
-            e_usr = html.escape(user.username)
-            e_hash = html.escape(get_hash_display(h.nt_hash))
-            e_pwd = html.escape(display_pwd or '')
-            history_rows += f"<tr><td>{e_dom}</td><td>{e_usr}</td><td>{e_hash}</td><td>{e_pwd}</td><td>{'Yes' if h.is_history else 'No'}</td></tr>"
+                row_html += "<td></td>"
 
-    shared_count = sum(len(u_list) for u_list in metrics['shared_passwords'].values())
+        row_html += "</tr>"
+        history_rows += row_html
 
-    final_html = html_template.format(
-        total_accounts=metrics['total_accounts'],
-        total_passwords=metrics['total_passwords'],
-        total_cracked=metrics['total_cracked'],
-        unique_passwords=len(metrics['unique_passwords']),
-        unique_cracked=len(metrics['unique_cracked']),
-        kerb_cracked=len(metrics['kerberoastable_cracked']),
-        asrep_cracked=len(metrics['asreproastable_cracked']),
-        high_val_cracked=len(metrics['high_value_cracked']),
-        pwd_not_req=len(metrics['passwordnotreqd']),
-        pwd_never_exp=len(metrics['pwdneverexpires']),
-        lm_hashes_count=len(metrics['lm_hashes']),
-        shared_count=shared_count,
-        policy_violations_count=len(metrics['policy_violations']),
-        length_bars=bars_html,
-        tables_html=tables_html,
-        history_rows=history_rows
-    )
+    history_content = f"""
+    <div class="card">
+        <h2>User Password History</h2>
+        <input type="text" id="histFilter" onkeyup="filterTable('histFilter', 'histTable')" placeholder="Filter by Domain or Username...">
+        <table id="histTable">
+            {history_headers}
+            {history_rows}
+        </table>
+    </div>
+    """
+    write_page("history.html", "Password History", history_content)
 
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(final_html)
-    logging.info(f"Report generated successfully: {output_file}")
+    logging.info(f"Reports generated successfully in directory: {output_dir}/")
 
 
 def main():
@@ -556,7 +629,7 @@ def main():
     metrics = calculate_metrics(users, high_value_groups, policy, args.redact, args.enabled_only)
     logging.info("Metrics calculated.")
 
-    generate_html_report(metrics, users, args.redact)
+    generate_html_report(metrics, users, args.redact, args.outdir)
 
 if __name__ == '__main__':
     main()
