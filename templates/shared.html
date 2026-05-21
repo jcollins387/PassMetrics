@@ -15,7 +15,7 @@
         {% for row in shared %}
         <tr>
             <td>{{ row.nt_hash }}</td>
-            <td>{{ row.cracked_password or 'Unknown' }}</td>
+            <td>{% if row.cracked_password is none %}{% elif row.cracked_password == 'Unknown' %}Unknown{% else %}{{ row.cracked_password }}{% endif %}</td>
             <td>{{ row.count }}</td>
             <td>
                 <details>
@@ -28,11 +28,19 @@
     </table>
     <div class="pagination">
         {% if page > 1 %}
-        <a href="?page={{ page - 1 }}">Previous</a>
+        <a href="?page={{ page - 1 }}&per_page={{ per_page }}">Previous</a>
         {% endif %}
         <span>Page {{ page }}</span>
-        {% if shared|length == 1000 %}
-        <a href="?page={{ page + 1 }}">Next</a>
+
+        <select onchange="window.location.href='?page=1&per_page='+this.value">
+            <option value="50" {% if per_page == 50 %}selected{% endif %}>50 per page</option>
+            <option value="100" {% if per_page == 100 %}selected{% endif %}>100 per page</option>
+            <option value="250" {% if per_page == 250 %}selected{% endif %}>250 per page</option>
+            <option value="500" {% if per_page == 500 %}selected{% endif %}>500 per page</option>
+        </select>
+
+        {% if shared|length == per_page %}
+        <a href="?page={{ page + 1 }}&per_page={{ per_page }}">Next</a>
         {% endif %}
     </div>
 </div>

@@ -5,10 +5,26 @@
 {% block content %}
 <div class="card">
     <h2>Password Length Distribution</h2>
-    <table>
+
+    <div style="margin-bottom: 20px;">
+        <h3>Chart</h3>
+        <div style="width: 100%; max-width: 600px;">
+            {% for row in lengths %}
+            <div style="display: flex; align-items: center; margin-bottom: 5px;">
+                <div style="width: 50px; text-align: right; padding-right: 10px;">{{ row.pw_length }}</div>
+                <div style="flex-grow: 1; background: #eee; height: 20px; position: relative;">
+                    <div style="background: #007bff; height: 100%; width: {{ (row.count / max_count * 100) }}%;"></div>
+                </div>
+                <div style="width: 50px; padding-left: 10px;">{{ row.count }}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <table id="lengthsTable">
         <tr>
-            <th>Length</th>
-            <th>Count</th>
+            <th onclick="sortTable(0)" style="cursor: pointer;">Length &#x21D5;</th>
+            <th onclick="sortTable(1)" style="cursor: pointer;">Count &#x21D5;</th>
         </tr>
         {% for row in lengths %}
         <tr>
@@ -18,4 +34,45 @@
         {% endfor %}
     </table>
 </div>
+
+<script>
+function sortTable(n) {
+  var table, rows, switching, i, x, y, shouldSwitch, dir, switchcount = 0;
+  table = document.getElementById("lengthsTable");
+  switching = true;
+  dir = "asc";
+  while (switching) {
+    switching = false;
+    rows = table.rows;
+    for (i = 1; i < (rows.length - 1); i++) {
+      shouldSwitch = false;
+      x = rows[i].getElementsByTagName("TD")[n];
+      y = rows[i + 1].getElementsByTagName("TD")[n];
+      var valX = parseInt(x.innerHTML);
+      var valY = parseInt(y.innerHTML);
+      if (dir == "asc") {
+        if (valX > valY) {
+          shouldSwitch = true;
+          break;
+        }
+      } else if (dir == "desc") {
+        if (valX < valY) {
+          shouldSwitch = true;
+          break;
+        }
+      }
+    }
+    if (shouldSwitch) {
+      rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);
+      switching = true;
+      switchcount ++;
+    } else {
+      if (switchcount == 0 && dir == "asc") {
+        dir = "desc";
+        switching = true;
+      }
+    }
+  }
+}
+</script>
 {% endblock %}
