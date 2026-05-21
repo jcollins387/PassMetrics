@@ -633,7 +633,9 @@ def generate_html_report(db_path: str, metrics: Dict, high_value_groups: List[st
         filter = input.value.toUpperCase();
         table = document.getElementById(tableId);
         tr = table.getElementsByTagName("tr");
+        // start at 1 to skip header, but check if row has class ignore-filter
         for (i = 1; i < tr.length; i++) {{
+            if (tr[i].classList.contains('ignore-filter')) continue;
             tr[i].style.display = "none";
             td = tr[i].getElementsByTagName("td");
             for (j = 0; j < td.length; j++) {{
@@ -647,11 +649,35 @@ def generate_html_report(db_path: str, metrics: Dict, high_value_groups: List[st
             }}
         }}
     }}
+
+    function toggleRows(tableId, selectId) {{
+        var select = document.getElementById(selectId);
+        var num = parseInt(select.value, 10);
+        var table = document.getElementById(tableId);
+        var trs = table.getElementsByClassName('data-row');
+        for (var i = 0; i < trs.length; i++) {{
+            if (i < num) {{
+                trs[i].style.display = '';
+            }} else {{
+                trs[i].style.display = 'none';
+            }}
+        }}
+    }}
+
+    function toggleAccounts(hashId) {{
+        var row = document.getElementById(hashId);
+        if (row.style.display === 'none' || row.style.display === '') {{
+            row.style.display = 'table-row';
+        }} else {{
+            row.style.display = 'none';
+        }}
+    }}
 </script>
 </head>
 <body>
     <nav>
         <a href="index.html">Summary</a>
+        <a href="lengths.html">Password Lengths</a>
         <a href="shared.html">Shared Passwords</a>
         <a href="lm_hashes.html">LM Hashes</a>
         <a href="policy.html">Policy Violations</a>
@@ -763,26 +789,126 @@ def generate_html_report(db_path: str, metrics: Dict, high_value_groups: List[st
     enabled_filter = "AND u.enabled = 1" if metrics.get('enabled_only_flag') else ""
     pwd_col = "h.redacted_password" if redact else "h.cracked_password"
 
+    # --- Password Lengths Page ---
+    c.execute(f"""
+        SELECT length(cracked_password) as pw_len, cracked_password
+        FROM hashes h JOIN users u ON h.user_id = u.id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}
+        GROUP BY cracked_password
+        ORDER BY pw_len ASC
+        LIMIT 100
+    """)
+    shortest = c.fetchall()
+
+    c.execute(f"""
+        SELECT length(cracked_password) as pw_len, cracked_password
+        FROM hashes h JOIN users u ON h.user_id = u.id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}
+        GROUP BY cracked_password
+        ORDER BY pw_len DESC
+        LIMIT 100
+    """)
+    longest = c.fetchall()
+
+    def generate_length_table(title, table_id, select_id, data):
+        html_str = f'<div class="card"><h2>{title}</h2>'
+        html_str += f'<label for="{select_id}">Show rows: </label>'
+        html_str += f'<select id="{select_id}" onchange="toggleRows(\'{table_id}\', \'{select_id}\')">'
+        html_str += '<option value="10" selected>10</option>'
+        html_str += '<option value="25">25</option>'
+        html_str += '<option value="50">50</option>'
+        html_str += '<option value="100">100</option>'
+        html_str += '</select>'
+        html_str += f'<table id="{table_id}">'
+        html_str += '<tr><th>Length</th><th>Password</th></tr>'
+        for i, row in enumerate(data):
+            display_style = '' if i < 10 else 'style="display:none;"'
+            pw_val = ('*' * len(row[1]) if len(row[1]) <= 2 else row[1][0] + '*' * (len(row[1])-2) + row[1][-1]) if redact else row[1]
+            html_str += f'<tr class="data-row" {display_style}><td>{row[0]}</td><td>{html.escape(pw_val)}</td></tr>'
+        html_str += '</table></div>'
+        return html_str
+
+    lengths_content = generate_length_table("Top 100 Shortest Passwords", "shortTable", "shortSelect", shortest)
+    lengths_content += generate_length_table("Top 100 Longest Passwords", "longTable", "longSelect", longest)
+    write_page("lengths.html", "Password Lengths", lengths_content)
+
     # --- Shared Passwords Page ---
     q_shared_count = f"""
-        SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id
-        WHERE h.is_history = 0 {enabled_filter} AND lower(h.nt_hash) IN (
-            SELECT lower(h2.nt_hash) FROM hashes h2 JOIN users u2 ON h2.user_id = u2.id
-            WHERE h2.is_history = 0 {enabled_filter}
-            GROUP BY lower(h2.nt_hash) HAVING COUNT(h2.id) > 1
+        SELECT COUNT(*) FROM (
+            SELECT lower(h.nt_hash) FROM hashes h JOIN users u ON h.user_id = u.id
+            WHERE h.is_history = 0 {enabled_filter}
+            GROUP BY lower(h.nt_hash) HAVING COUNT(h.id) > 1
         )
     """
-    q_shared = f"""
-        SELECT u.domain, u.username, {pwd_col}
-        FROM hashes h JOIN users u ON h.user_id = u.id
-        WHERE h.is_history = 0 {enabled_filter} AND lower(h.nt_hash) IN (
-            SELECT lower(h2.nt_hash) FROM hashes h2 JOIN users u2 ON h2.user_id = u2.id
-            WHERE h2.is_history = 0 {enabled_filter}
-            GROUP BY lower(h2.nt_hash) HAVING COUNT(h2.id) > 1
-        )
-        ORDER BY lower(h.nt_hash), u.domain, u.username
-    """
-    generate_paginated_pages("shared", "Shared Passwords", ["Domain", "Username", "Password"], q_shared, q_shared_count)
+    c.execute(q_shared_count)
+    total_shared_hashes = c.fetchone()[0]
+    total_shared_pages = math.ceil(total_shared_hashes / 1000)
+
+    if total_shared_pages == 0:
+        content = f'<div class="card"><h2>Shared Passwords</h2><p>No data available.</p></div>'
+        write_page("shared_1.html", "Shared Passwords", content)
+    else:
+        for page in range(1, total_shared_pages + 1):
+            offset = (page - 1) * 1000
+            # Get the distinct shared hashes
+            c.execute(f"""
+                SELECT lower(h.nt_hash), {pwd_col}, COUNT(h.id) as count
+                FROM hashes h JOIN users u ON h.user_id = u.id
+                WHERE h.is_history = 0 {enabled_filter}
+                GROUP BY lower(h.nt_hash) HAVING COUNT(h.id) > 1
+                ORDER BY count DESC
+                LIMIT 1000 OFFSET {offset}
+            """)
+            shared_page = c.fetchall()
+
+            shared_rows_html = ""
+            for i, row in enumerate(shared_page):
+                nt_hash = row[0]
+                pwd_display = html.escape(row[1] if row[1] else "")
+                hash_display = ('*' * 32 if redact else nt_hash)
+                count = row[2]
+
+                # Fetch users for this hash
+                c.execute(f"""
+                    SELECT u.domain, u.username
+                    FROM hashes h JOIN users u ON h.user_id = u.id
+                    WHERE lower(h.nt_hash) = ? AND h.is_history = 0 {enabled_filter}
+                    ORDER BY u.domain, u.username
+                """, (nt_hash,))
+                users_for_hash = c.fetchall()
+
+                row_id = f"hash_row_{page}_{i}"
+                shared_rows_html += f"""
+                    <tr>
+                        <td>{hash_display}</td>
+                        <td>{pwd_display}</td>
+                        <td>{count}</td>
+                        <td><a href="javascript:void(0);" onclick="toggleAccounts('{row_id}')">View Accounts</a></td>
+                    </tr>
+                    <tr id="{row_id}" class="ignore-filter" style="display:none; background-color: #f9f9f9;">
+                        <td colspan="4">
+                            <ul>
+                                {"".join(f"<li>{html.escape(u[0])}\\\\{html.escape(u[1])}</li>" for u in users_for_hash)}
+                            </ul>
+                        </td>
+                    </tr>
+                """
+
+            table_html = f"""
+            <div class="card">
+                <h2>Shared Passwords</h2>
+                <input type="text" id="sharedFilter" onkeyup="filterTable('sharedFilter', 'sharedTable')" placeholder="Filter by Hash, Password or Count...">
+                <table id="sharedTable">
+                    <tr><th>NT Hash</th><th>Password</th><th>Count</th><th>Action</th></tr>
+                    {shared_rows_html}
+                </table>
+            </div>
+            """
+
+            pagination = generate_pagination_html("shared", page, total_shared_pages)
+            final_content = pagination + table_html + pagination
+
+            write_page(f"shared_{page}.html", "Shared Passwords", final_content)
 
     # --- LM Hashes Page ---
     q_lm_count = f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND lower(h.lm_hash) != 'aad3b435b51404eeaad3b435b51404ee' {enabled_filter}"
