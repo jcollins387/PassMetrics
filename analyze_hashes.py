@@ -3,6 +3,9 @@ import sys
 import json
 import logging
 import html
+import sqlite3
+import math
+import concurrent.futures
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set
 
@@ -37,6 +40,56 @@ class UserData:
                 return h
         return None
 
+def init_db(db_path: str):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain TEXT,
+            username TEXT,
+            rid INTEGER,
+            enabled BOOLEAN DEFAULT 1,
+            pwdneverexpires BOOLEAN DEFAULT 0,
+            passwordnotreqd BOOLEAN DEFAULT 0,
+            kerberoastable BOOLEAN DEFAULT 0,
+            asreproastable BOOLEAN DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS hashes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            lm_hash TEXT,
+            nt_hash TEXT,
+            is_history BOOLEAN,
+            cracked_password TEXT,
+            redacted_password TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS cracked_hashes (
+            nt_hash TEXT PRIMARY KEY,
+            cracked_password TEXT
+        );
+        CREATE TABLE IF NOT EXISTS user_groups (
+            user_id INTEGER,
+            group_name TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS policy_violations (
+            user_id INTEGER,
+            reason TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_users_domain_username ON users(domain, username);
+        CREATE INDEX IF NOT EXISTS idx_hashes_user_id ON hashes(user_id);
+        CREATE INDEX IF NOT EXISTS idx_hashes_nt_hash ON hashes(nt_hash);
+        CREATE INDEX IF NOT EXISTS idx_hashes_is_history ON hashes(is_history);
+        CREATE INDEX IF NOT EXISTS idx_user_groups_user_id ON user_groups(user_id);
+    ''')
+    conn.commit()
+    conn.close()
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Analyze NTDS hashes against a potfile and optional Bloodhound data.")
 
@@ -51,9 +104,12 @@ def parse_args():
 
     return parser.parse_args()
 
-def parse_potfile(potfile_path: str) -> Dict[str, str]:
-    """Returns a dict mapping NTHash (lowercase) to cracked password."""
-    cracked = {}
+def parse_potfile(potfile_path: str, db_path: str):
+    """Parses hashcat potfile and inserts hashes into the DB."""
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    batch = []
+
     with open(potfile_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             line = line.strip()
@@ -65,13 +121,30 @@ def parse_potfile(potfile_path: str) -> Dict[str, str]:
                 # NTHashes in potfile are usually 32 chars long. We index by lowercase to avoid case issues
                 h, p = parts
                 if len(h) == 32:
-                    cracked[h.lower()] = p
-    return cracked
+                    batch.append((h.lower(), p))
 
-def parse_ntds(ntds_path: str, cracked: Dict[str, str]) -> Dict[str, UserData]:
-    """Parses NTDS dump, skips krbtgt/machine accounts, returns dict mapped by domain\\username."""
-    users: Dict[str, UserData] = {}
+            if len(batch) >= 100000:
+                c.executemany("INSERT OR IGNORE INTO cracked_hashes (nt_hash, cracked_password) VALUES (?, ?)", batch)
+                batch = []
+
+    if batch:
+        c.executemany("INSERT OR IGNORE INTO cracked_hashes (nt_hash, cracked_password) VALUES (?, ?)", batch)
+
+    conn.commit()
+    conn.close()
+
+def parse_ntds(ntds_path: str, db_path: str):
+    """Parses NTDS dump, skips krbtgt/machine accounts, inserts directly into DB."""
     logging.info(f"Parsing NTDS file: {ntds_path}")
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    users_batch = []
+    hashes_batch = []
+
+    user_key_to_id = {} # map domain\username -> internal sqlite rowid
+    next_user_id = 1
+
     count = 0
     with open(ntds_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
@@ -119,88 +192,198 @@ def parse_ntds(ntds_path: str, cracked: Dict[str, str]) -> Dict[str, UserData]:
 
             key = f"{domain}\\{base_username}".lower()
 
-            if key not in users:
-                users[key] = UserData(domain=domain, username=base_username, rid=rid)
+            if key not in user_key_to_id:
+                user_key_to_id[key] = next_user_id
+                users_batch.append((next_user_id, domain, base_username, rid))
+                next_user_id += 1
 
-            # Check if this hash is cracked
-            cracked_pass = cracked.get(nt_hash.lower())
+            user_id = user_key_to_id[key]
+            hashes_batch.append((user_id, lm_hash, nt_hash, is_history))
 
-            hdata = HashData(lm_hash=lm_hash, nt_hash=nt_hash, is_history=is_history, cracked_password=cracked_pass)
-            users[key].hashes.append(hdata)
+            if len(users_batch) >= 100000:
+                c.executemany("INSERT INTO users (id, domain, username, rid) VALUES (?, ?, ?, ?)", users_batch)
+                users_batch = []
 
-    return users
+            if len(hashes_batch) >= 100000:
+                c.executemany("INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)", hashes_batch)
+                hashes_batch = []
 
-def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
-    """Parses bloodhound users JSON and group memberships."""
-    # Pre-compute username fallback index to avoid O(N^2) lookups
-    fallback_index = {}
-    for k in users.keys():
-        parts = k.split('\\')
-        if len(parts) > 1:
-            fallback_index[parts[1].lower()] = k
+    if users_batch:
+        c.executemany("INSERT INTO users (id, domain, username, rid) VALUES (?, ?, ?, ?)", users_batch)
+    if hashes_batch:
+        c.executemany("INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)", hashes_batch)
 
-    for bh_file in bh_files:
-        logging.info(f"Parsing Bloodhound file: {bh_file}")
-        with open(bh_file, 'r', encoding='utf-8') as f:
-            try:
-                data = json.load(f)
-            except json.JSONDecodeError:
-                logging.error(f"Failed to parse Bloodhound file {bh_file}")
-                continue
+    conn.commit()
 
-            if 'data' not in data:
-                continue
+    logging.info("Updating hashes with cracked passwords...")
+    # Link cracked passwords to the hashes
+    c.execute("""
+        UPDATE hashes
+        SET cracked_password = (
+            SELECT cracked_password
+            FROM cracked_hashes
+            WHERE cracked_hashes.nt_hash = lower(hashes.nt_hash)
+        )
+        WHERE lower(hashes.nt_hash) IN (SELECT nt_hash FROM cracked_hashes)
+    """)
+    conn.commit()
+    conn.close()
 
-            total_items = len(data['data'])
-            for i, item in enumerate(data['data']):
-                if (i + 1) % 10000 == 0:
-                    logging.info(f"Processed {i + 1}/{total_items} items from {bh_file}...")
+def _process_bh_file(bh_file: str):
+    user_updates = []
+    group_inserts = []
 
-                item_type = item.get('type', item.get('Type', '')).upper()
-                props = item.get('Properties', {})
+    with open(bh_file, 'r', encoding='utf-8') as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            logging.error(f"Failed to parse Bloodhound file {bh_file}")
+            return user_updates, group_inserts
 
-                if item_type == 'USER' or (not item_type and props.get('samaccountname')):
-                    domain = props.get('domain', '').split('.')[0] # Try to match short name
-                    samaccountname = props.get('samaccountname', '')
-                    if not samaccountname:
-                        continue
+        if 'data' not in data:
+            return user_updates, group_inserts
 
-                    key = f"{domain}\\{samaccountname}".lower()
+        for item in data['data']:
+            item_type = item.get('type', item.get('Type', '')).upper()
+            props = item.get('Properties', {})
 
-                    # Check if we have this user from NTDS
-                    matched_user = users.get(key)
-                    if not matched_user:
-                        fallback_key = fallback_index.get(samaccountname.lower())
-                        if fallback_key:
-                            matched_user = users.get(fallback_key)
+            if item_type == 'USER' or (not item_type and props.get('samaccountname')):
+                domain = props.get('domain', '').split('.')[0]
+                samaccountname = props.get('samaccountname', '')
+                if samaccountname:
+                    user_updates.append({
+                        'domain': domain.lower(),
+                        'samaccountname': samaccountname.lower(),
+                        'enabled': props.get('enabled', True),
+                        'pwdneverexpires': props.get('pwdneverexpires', False),
+                        'passwordnotreqd': props.get('passwordnotreqd', False),
+                        'kerberoastable': props.get('hasspn', False),
+                        'asreproastable': props.get('dontreqpreauth', False)
+                    })
 
-                    if matched_user:
-                        matched_user.enabled = props.get('enabled', True)
-                        matched_user.pwdneverexpires = props.get('pwdneverexpires', False)
-                        matched_user.passwordnotreqd = props.get('passwordnotreqd', False)
-                        matched_user.kerberoastable = props.get('hasspn', False)
-                        matched_user.asreproastable = props.get('dontreqpreauth', False)
-
-                # Groups might contain memberships in "Members" array
-                if item_type == 'GROUP' or (not item_type and 'Members' in item):
-                    group_name = props.get('name', '').split('@')[0] if props.get('name') else ''
+            if item_type == 'GROUP' or (not item_type and 'Members' in item):
+                group_name = props.get('name', '').split('@')[0] if props.get('name') else ''
+                if group_name:
                     for member in item.get('Members', []):
                         m_type = member.get('ObjectType', member.get('type', '')).upper()
                         if m_type == 'USER':
                             m_name = member.get('ObjectName', member.get('name', ''))
                             if m_name:
                                 m_parts = m_name.split('@')
-                                m_user = m_parts[0]
-                                m_dom = m_parts[1].split('.')[0] if len(m_parts) > 1 else ''
+                                m_user = m_parts[0].lower()
+                                m_dom = m_parts[1].split('.')[0].lower() if len(m_parts) > 1 else ''
+                                group_inserts.append((m_dom, m_user, group_name))
 
-                                u_key = f"{m_dom}\\{m_user}".lower()
-                                matched = users.get(u_key)
-                                if not matched:
-                                    fallback_key = fallback_index.get(m_user.lower())
-                                    if fallback_key:
-                                        matched = users.get(fallback_key)
-                                if matched and group_name:
-                                    matched.groups.add(group_name)
+    return user_updates, group_inserts
+
+
+def parse_bloodhound(bh_files: List[str], db_path: str):
+    """Parses bloodhound users JSON and group memberships using multiprocessing."""
+    if not bh_files:
+        return
+
+    logging.info(f"Parsing {len(bh_files)} Bloodhound files...")
+    all_user_updates = []
+    all_group_inserts = []
+
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        for updates, inserts in executor.map(_process_bh_file, bh_files):
+            all_user_updates.extend(updates)
+            all_group_inserts.extend(inserts)
+
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    # Batch update users
+    if all_user_updates:
+        logging.info("Applying Bloodhound user updates to DB...")
+        # Since sqlite doesn't easily support updating a join or doing an executemany with fallback directly without a temp table,
+        # we will use a temporary table to hold updates, and then apply them.
+        c.executescript("""
+            CREATE TEMP TABLE bh_users (
+                domain TEXT,
+                username TEXT,
+                enabled BOOLEAN,
+                pwdneverexpires BOOLEAN,
+                passwordnotreqd BOOLEAN,
+                kerberoastable BOOLEAN,
+                asreproastable BOOLEAN
+            );
+            CREATE INDEX idx_bh_users ON bh_users(domain, username);
+            CREATE INDEX idx_bh_users_username ON bh_users(username);
+        """)
+
+        batch = [(u['domain'], u['samaccountname'], u['enabled'], u['pwdneverexpires'], u['passwordnotreqd'], u['kerberoastable'], u['asreproastable']) for u in all_user_updates]
+        c.executemany("INSERT INTO bh_users VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+
+        # Apply strict match (domain + username)
+        c.execute("""
+            UPDATE users SET
+                enabled = (SELECT enabled FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
+                pwdneverexpires = (SELECT pwdneverexpires FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
+                passwordnotreqd = (SELECT passwordnotreqd FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
+                kerberoastable = (SELECT kerberoastable FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
+                asreproastable = (SELECT asreproastable FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username))
+            WHERE EXISTS (
+                SELECT 1 FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)
+            )
+        """)
+
+        # Apply fallback match (username only for users that weren't matched above)
+        # This mirrors the fallback_index logic in the original script
+        c.execute("""
+            UPDATE users SET
+                enabled = (SELECT enabled FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
+                pwdneverexpires = (SELECT pwdneverexpires FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
+                passwordnotreqd = (SELECT passwordnotreqd FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
+                kerberoastable = (SELECT kerberoastable FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
+                asreproastable = (SELECT asreproastable FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)
+            ) AND EXISTS (
+                SELECT 1 FROM bh_users WHERE bh_users.username = lower(users.username)
+            )
+        """)
+
+        c.execute("DROP TABLE bh_users")
+
+    if all_group_inserts:
+        logging.info("Applying Bloodhound group memberships to DB...")
+        c.executescript("""
+            CREATE TEMP TABLE bh_groups (
+                domain TEXT,
+                username TEXT,
+                group_name TEXT
+            );
+            CREATE INDEX idx_bh_groups ON bh_groups(domain, username);
+            CREATE INDEX idx_bh_groups_username ON bh_groups(username);
+        """)
+
+        c.executemany("INSERT INTO bh_groups VALUES (?, ?, ?)", all_group_inserts)
+
+        # Strict match insert
+        c.execute("""
+            INSERT INTO user_groups (user_id, group_name)
+            SELECT u.id, g.group_name
+            FROM users u
+            JOIN bh_groups g ON lower(u.domain) = g.domain AND lower(u.username) = g.username
+        """)
+
+        # Fallback match insert for those not matched strictly
+        c.execute("""
+            INSERT INTO user_groups (user_id, group_name)
+            SELECT u.id, g.group_name
+            FROM users u
+            JOIN bh_groups g ON lower(u.username) = g.username
+            WHERE NOT EXISTS (
+                SELECT 1 FROM bh_groups bg WHERE bg.domain = lower(u.domain) AND bg.username = lower(u.username)
+            )
+        """)
+
+        c.execute("DROP TABLE bh_groups")
+
+    conn.commit()
+    conn.close()
 
 def parse_high_value(file_path: Optional[str]) -> List[str]:
     """Returns list of high value groups."""
@@ -237,137 +420,179 @@ def redact_string(value: str) -> str:
         return '*' * len(value)
     return value[0] + '*' * (len(value) - 2) + value[-1]
 
-def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], policy: Dict, redact: bool, enabled_only: bool) -> Dict:
+def calculate_metrics(db_path: str, high_value_groups: List[str], policy: Dict, redact: bool, enabled_only: bool) -> Dict:
+    logging.info("Calculating metrics using SQLite...")
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    enabled_filter = "AND u.enabled = 1" if enabled_only else ""
+
     metrics = {
         'total_accounts': 0,
-        'kerberoastable_cracked': [],
-        'asreproastable_cracked': [],
-        'high_value_cracked': [],
-        'policy_violations': [],
-        'unique_passwords': set(),
-        'unique_cracked': set(),
         'total_passwords': 0,
         'total_cracked': 0,
-        'lm_hashes': [],
-        'shared_passwords': {}, # mapping of nt_hash -> list of users
-        'pwdneverexpires': [],
-        'passwordnotreqd': [],
+        'unique_passwords_count': 0,
+        'unique_cracked_count': 0,
+        'kerberoastable_cracked_count': 0,
+        'asreproastable_cracked_count': 0,
+        'high_value_cracked_count': 0,
+        'pwdneverexpires_count': 0,
+        'passwordnotreqd_count': 0,
+        'lm_hashes_count': 0,
+        'shared_passwords_count': 0,
+        'policy_violations_count': 0,
         'password_lengths': {},
         'enabled_only_flag': enabled_only
     }
 
-    # Pre-filter accounts
-    active_users = []
-    for key, user in users.items():
-        if enabled_only and not user.enabled:
-            continue
-        active_users.append(user)
+    # Redact cracked passwords in the DB if requested
+    if redact:
+        logging.info("Redacting passwords in DB...")
+        c.execute("""
+            UPDATE hashes
+            SET redacted_password = CASE
+                WHEN length(cracked_password) <= 2 THEN substr('********************************', 1, length(cracked_password))
+                ELSE substr(cracked_password, 1, 1) || substr('********************************', 1, length(cracked_password)-2) || substr(cracked_password, -1, 1)
+            END
+            WHERE cracked_password IS NOT NULL
+        """)
+        conn.commit()
 
-    metrics['total_accounts'] = len(active_users)
-    logging.info(f"Calculating metrics for {len(active_users)} active users...")
+    # Totals
+    c.execute(f"SELECT COUNT(*) FROM users u WHERE 1=1 {enabled_filter}")
+    metrics['total_accounts'] = c.fetchone()[0]
 
-    for i, user in enumerate(active_users):
-        if (i + 1) % 10000 == 0:
-            logging.info(f"Calculated metrics for {i + 1}/{len(active_users)} users...")
+    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 {enabled_filter}")
+    metrics['total_passwords'] = c.fetchone()[0]
 
-        current_hash = user.current_hash
-        if not current_hash:
-            continue
+    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}")
+    metrics['total_cracked'] = c.fetchone()[0]
 
-        # Optional redaction
-        if redact and current_hash.cracked_password:
-            current_hash.redacted_password = redact_string(current_hash.cracked_password)
+    c.execute(f"SELECT COUNT(DISTINCT lower(h.nt_hash)) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 {enabled_filter}")
+    metrics['unique_passwords_count'] = c.fetchone()[0]
 
-        # We process based on the current hash
+    c.execute(f"SELECT COUNT(DISTINCT h.cracked_password) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}")
+    metrics['unique_cracked_count'] = c.fetchone()[0]
 
-        # Kerberoastable/ASREPRoastable
-        if user.kerberoastable and current_hash.cracked_password and user.enabled:
-            metrics['kerberoastable_cracked'].append(user)
-        if user.asreproastable and current_hash.cracked_password and user.enabled:
-            metrics['asreproastable_cracked'].append(user)
+    # Roastable cracked
+    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.kerberoastable = 1 {enabled_filter}")
+    metrics['kerberoastable_cracked_count'] = c.fetchone()[0]
 
-        # High value targets
-        is_high_value = False
-        high_value_groups_lower = [g.lower() for g in high_value_groups]
-        for grp in user.groups:
-            if grp.lower() in high_value_groups_lower:
-                is_high_value = True
+    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.asreproastable = 1 {enabled_filter}")
+    metrics['asreproastable_cracked_count'] = c.fetchone()[0]
+
+    # High Value cracked
+    hv_placeholders = ','.join('?' * len(high_value_groups))
+    hv_params = [g.lower() for g in high_value_groups]
+    c.execute(f"""
+        SELECT COUNT(DISTINCT u.id)
+        FROM users u
+        JOIN hashes h ON u.id = h.user_id
+        JOIN user_groups ug ON u.id = ug.user_id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
+        AND lower(ug.group_name) IN ({hv_placeholders}) {enabled_filter}
+    """, hv_params)
+    metrics['high_value_cracked_count'] = c.fetchone()[0]
+
+    # Flags
+    c.execute(f"SELECT COUNT(*) FROM users u WHERE u.pwdneverexpires = 1 {enabled_filter}")
+    metrics['pwdneverexpires_count'] = c.fetchone()[0]
+
+    c.execute(f"SELECT COUNT(*) FROM users u WHERE u.passwordnotreqd = 1 {enabled_filter}")
+    metrics['passwordnotreqd_count'] = c.fetchone()[0]
+
+    # LM Hashes
+    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND lower(h.lm_hash) != 'aad3b435b51404eeaad3b435b51404ee' {enabled_filter}")
+    metrics['lm_hashes_count'] = c.fetchone()[0]
+
+    # Shared Passwords
+    c.execute(f"""
+        SELECT COUNT(*) FROM (
+            SELECT lower(h.nt_hash) FROM hashes h JOIN users u ON h.user_id = u.id
+            WHERE h.is_history = 0 {enabled_filter}
+            GROUP BY lower(h.nt_hash) HAVING COUNT(h.id) > 1
+        )
+    """)
+    shared_hashes_count = c.fetchone()[0]
+
+    # We want the total accounts sharing passwords, not just the number of unique shared hashes
+    c.execute(f"""
+        SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id
+        WHERE h.is_history = 0 {enabled_filter} AND lower(h.nt_hash) IN (
+            SELECT lower(h2.nt_hash) FROM hashes h2 JOIN users u2 ON h2.user_id = u2.id
+            WHERE h2.is_history = 0 {enabled_filter}
+            GROUP BY lower(h2.nt_hash) HAVING COUNT(h2.id) > 1
+        )
+    """)
+    metrics['shared_passwords_count'] = c.fetchone()[0]
+
+    # Password Lengths
+    c.execute(f"SELECT length(h.cracked_password), COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter} GROUP BY length(h.cracked_password)")
+    for row in c.fetchall():
+        metrics['password_lengths'][row[0]] = row[1]
+
+    # Policy Violations
+    logging.info("Calculating policy violations...")
+    c.execute(f"""
+        SELECT u.id, h.cracked_password, group_concat(lower(ug.group_name))
+        FROM users u
+        JOIN hashes h ON u.id = h.user_id
+        LEFT JOIN user_groups ug ON u.id = ug.user_id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}
+        GROUP BY u.id
+    """)
+
+    violations = []
+    fgpp_policies = policy.get('fgpp', {})
+    base_policy = policy.get('base', {})
+
+    for row in c.fetchall():
+        user_id = row[0]
+        pwd = row[1]
+        user_groups_lower = row[2].split(',') if row[2] else []
+
+        applicable_policy = base_policy
+        for group, g_policy in fgpp_policies.items():
+            if group.lower() in user_groups_lower:
+                applicable_policy = g_policy
                 break
 
-        if is_high_value and current_hash.cracked_password:
-            metrics['high_value_cracked'].append(user)
+        if applicable_policy:
+            min_len = applicable_policy.get('length', 0)
+            req_complexity = applicable_policy.get('complexity', False)
 
-        # Totals and Uniques
-        metrics['total_passwords'] += 1
-        metrics['unique_passwords'].add(current_hash.nt_hash.lower())
+            reasons = []
+            if len(pwd) < min_len:
+                reasons.append(f"Length < {min_len}")
 
-        if current_hash.cracked_password:
-            metrics['total_cracked'] += 1
-            metrics['unique_cracked'].add(current_hash.cracked_password)
+            if req_complexity:
+                has_upper = any(char.isupper() for char in pwd)
+                has_lower = any(char.islower() for char in pwd)
+                has_digit = any(char.isdigit() for char in pwd)
+                has_special = any(not char.isalnum() for char in pwd)
+                if sum([has_upper, has_lower, has_digit, has_special]) < 3:
+                    reasons.append("Fails complexity")
 
-            # Length distribution
-            pw_len = len(current_hash.cracked_password)
-            metrics['password_lengths'][pw_len] = metrics['password_lengths'].get(pw_len, 0) + 1
+            if reasons:
+                violations.append((user_id, ", ".join(reasons)))
 
-            # Policy Violations
-            # Find applicable policy
-            applicable_policy = policy.get('base', {})
-            fgpp_policies = policy.get('fgpp', {})
+    if violations:
+        c.executemany("INSERT INTO policy_violations (user_id, reason) VALUES (?, ?)", violations)
+        conn.commit()
 
-            # Check for FGPP matching user's groups
-            # Use lowercase for case-insensitive matching
-            user_groups_lower = [g.lower() for g in user.groups]
-            for group, g_policy in fgpp_policies.items():
-                if group.lower() in user_groups_lower:
-                    applicable_policy = g_policy
-                    break
+    metrics['policy_violations_count'] = len(violations)
 
-            if applicable_policy:
-                min_len = applicable_policy.get('length', 0)
-                req_complexity = applicable_policy.get('complexity', False)
-                # lifetime is harder to check purely statically without dates, but we can report if length or complexity fails
-
-                reasons = []
-                if pw_len < min_len:
-                    reasons.append(f"Length < {min_len}")
-
-                if req_complexity:
-                    has_upper = any(c.isupper() for c in current_hash.cracked_password)
-                    has_lower = any(c.islower() for c in current_hash.cracked_password)
-                    has_digit = any(c.isdigit() for c in current_hash.cracked_password)
-                    has_special = any(not c.isalnum() for c in current_hash.cracked_password)
-                    complexity_score = sum([has_upper, has_lower, has_digit, has_special])
-                    if complexity_score < 3: # Standard AD complexity rule
-                        reasons.append("Fails complexity")
-
-                if reasons:
-                    metrics['policy_violations'].append({'user': user, 'reason': ", ".join(reasons)})
-
-        # LM Hashes (Blank LM hash is aad3b435b51404eeaad3b435b51404ee)
-        if current_hash.lm_hash.lower() != 'aad3b435b51404eeaad3b435b51404ee':
-            metrics['lm_hashes'].append(user)
-
-        # Shared Passwords
-        if current_hash.nt_hash.lower() not in metrics['shared_passwords']:
-            metrics['shared_passwords'][current_hash.nt_hash.lower()] = []
-        metrics['shared_passwords'][current_hash.nt_hash.lower()].append(user)
-
-        # Flags
-        if user.pwdneverexpires:
-            metrics['pwdneverexpires'].append(user)
-        if user.passwordnotreqd:
-            metrics['passwordnotreqd'].append(user)
-
-    # Filter shared passwords to only those with >1 user
-    shared = {h: u_list for h, u_list in metrics['shared_passwords'].items() if len(u_list) > 1}
-    metrics['shared_passwords'] = shared
-
+    conn.close()
     return metrics
 
 import os
 import time
 
-def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool, output_dir: Optional[str] = None):
+def generate_html_report(db_path: str, metrics: Dict, high_value_groups: List[str], redact: bool, output_dir: Optional[str] = None):
+    logging.info("Generating HTML reports...")
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
     if not output_dir:
         timestamp = int(time.time())
         output_dir = f"report_{timestamp}"
@@ -396,6 +621,10 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
     nav {{ background: #fff; padding: 10px; margin-bottom: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
     nav a {{ margin-right: 15px; text-decoration: none; color: #337ab7; font-weight: bold; }}
     nav a:hover {{ text-decoration: underline; }}
+    .pagination {{ margin-top: 15px; text-align: center; }}
+    .pagination a {{ text-decoration: none; padding: 5px 10px; background: #337ab7; color: #fff; border-radius: 3px; margin: 0 5px; }}
+    .pagination a:hover {{ background: #23527c; }}
+    .pagination span {{ padding: 5px 10px; margin: 0 5px; }}
 </style>
 <script>
     function filterTable(inputId, tableId) {{
@@ -404,7 +633,9 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
         filter = input.value.toUpperCase();
         table = document.getElementById(tableId);
         tr = table.getElementsByTagName("tr");
+        // start at 1 to skip header, but check if row has class ignore-filter
         for (i = 1; i < tr.length; i++) {{
+            if (tr[i].classList.contains('ignore-filter')) continue;
             tr[i].style.display = "none";
             td = tr[i].getElementsByTagName("td");
             for (j = 0; j < td.length; j++) {{
@@ -418,11 +649,35 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
             }}
         }}
     }}
+
+    function toggleRows(tableId, selectId) {{
+        var select = document.getElementById(selectId);
+        var num = parseInt(select.value, 10);
+        var table = document.getElementById(tableId);
+        var trs = table.getElementsByClassName('data-row');
+        for (var i = 0; i < trs.length; i++) {{
+            if (i < num) {{
+                trs[i].style.display = '';
+            }} else {{
+                trs[i].style.display = 'none';
+            }}
+        }}
+    }}
+
+    function toggleAccounts(hashId) {{
+        var row = document.getElementById(hashId);
+        if (row.style.display === 'none' || row.style.display === '') {{
+            row.style.display = 'table-row';
+        }} else {{
+            row.style.display = 'none';
+        }}
+    }}
 </script>
 </head>
 <body>
     <nav>
         <a href="index.html">Summary</a>
+        <a href="lengths.html">Password Lengths</a>
         <a href="shared.html">Shared Passwords</a>
         <a href="lm_hashes.html">LM Hashes</a>
         <a href="policy.html">Policy Violations</a>
@@ -448,43 +703,62 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
         height_px = max(10, int((count / max_count) * 180)) # max height 180px
         bars_html += f'<div class="bar-col"><div class="bar" style="height:{height_px}px" title="{count} passwords">{count}</div><div class="bar-label">{length}</div></div>'
 
-    def get_pwd_display(user):
-        h = user.current_hash
-        if not h or not h.cracked_password:
-            return ""
-        return h.redacted_password if redact else h.cracked_password
-
-    def get_hash_display(h_str):
-        if not h_str:
-            return ""
-        return redact_string(h_str) if redact else h_str
-
     def write_page(filename, title, content):
         path = os.path.join(output_dir, filename)
         final_html = base_html_template.format(page_title=title, content=content)
         with open(path, 'w', encoding='utf-8') as f:
             f.write(final_html)
 
-    # Helper to generate tables
-    def generate_table(title, table_id, headers, rows):
-        if not rows:
-            return f'<div class="card"><h2>{title}</h2><p>No data available.</p></div>'
-        table_html = f'<div class="card"><h2>{title}</h2>'
-        table_html += f'<input type="text" id="{table_id}Filter" onkeyup="filterTable(\'{table_id}Filter\', \'{table_id}\')" placeholder="Filter...">'
-        table_html += f'<table id="{table_id}"><tr>'
-        for h in headers:
-            table_html += f'<th>{h}</th>'
-        table_html += '</tr>'
-        for row in rows:
-            table_html += '<tr>'
-            for cell in row:
-                escaped_cell = html.escape(str(cell)) if cell is not None else ''
-                table_html += f'<td>{escaped_cell}</td>'
-            table_html += '</tr>'
-        table_html += '</table></div>'
-        return table_html
+    def generate_pagination_html(base_name, current_page, total_pages):
+        if total_pages <= 1:
+            return ""
 
-    shared_count = sum(len(u_list) for u_list in metrics['shared_passwords'].values())
+        html_out = '<div class="pagination">'
+        if current_page > 1:
+            html_out += f'<a href="{base_name}_{current_page - 1}.html">Previous</a>'
+        html_out += f'<span>Page {current_page} of {total_pages}</span>'
+        if current_page < total_pages:
+            html_out += f'<a href="{base_name}_{current_page + 1}.html">Next</a>'
+        html_out += '</div>'
+        return html_out
+
+    def generate_paginated_pages(base_name, title, headers, query, count_query, params=(), rows_per_page=1000):
+        c.execute(count_query, params)
+        total_rows = c.fetchone()[0]
+        total_pages = math.ceil(total_rows / rows_per_page)
+
+        if total_pages == 0:
+            content = f'<div class="card"><h2>{title}</h2><p>No data available.</p></div>'
+            write_page(f"{base_name}_1.html", title, content)
+            return
+
+        for page in range(1, total_pages + 1):
+            offset = (page - 1) * rows_per_page
+
+            # Since limit and offset can't easily be parameterized with the exact array size in sqlite in the same way, we append them
+            page_query = query + f" LIMIT {rows_per_page} OFFSET {offset}"
+            c.execute(page_query, params)
+            rows = c.fetchall()
+
+            table_html = f'<div class="card"><h2>{title}</h2>'
+            table_id = f"{base_name}Table"
+            table_html += f'<input type="text" id="{table_id}Filter" onkeyup="filterTable(\'{table_id}Filter\', \'{table_id}\')" placeholder="Filter...">'
+            table_html += f'<table id="{table_id}"><tr>'
+            for h in headers:
+                table_html += f'<th>{h}</th>'
+            table_html += '</tr>'
+            for row in rows:
+                table_html += '<tr>'
+                for cell in row:
+                    escaped_cell = html.escape(str(cell)) if cell is not None else ''
+                    table_html += f'<td>{escaped_cell}</td>'
+                table_html += '</tr>'
+            table_html += '</table></div>'
+
+            pagination = generate_pagination_html(base_name, page, total_pages)
+            final_content = pagination + table_html + pagination
+
+            write_page(f"{base_name}_{page}.html", title, final_content)
 
     # --- Index Page ---
     index_content = f"""
@@ -492,15 +766,15 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
         <h2>Summary Metrics</h2>
         <p>Total Evaluated Accounts: <span class="metric">{metrics['total_accounts']}</span></p>
         <p>Total Passwords: {metrics['total_passwords']} | Total Cracked: <span class="metric">{metrics['total_cracked']}</span></p>
-        <p>Unique Passwords: {len(metrics['unique_passwords'])} | Unique Cracked: <span class="metric">{len(metrics['unique_cracked'])}</span></p>
-        <p>Kerberoastable & Cracked: <span class="metric">{len(metrics['kerberoastable_cracked'])}</span></p>
-        <p>ASREPRoastable & Cracked: <span class="metric">{len(metrics['asreproastable_cracked'])}</span></p>
-        <p>High Value Accounts Cracked: <span class="metric">{len(metrics['high_value_cracked'])}</span></p>
-        <p>Accounts with Password Not Required: <span class="metric">{len(metrics['passwordnotreqd'])}</span></p>
-        <p>Accounts with Password Never Expires: <span class="metric">{len(metrics['pwdneverexpires'])}</span></p>
-        <p>Accounts with LM Hashes: <span class="metric">{len(metrics['lm_hashes'])}</span></p>
-        <p>Accounts Sharing Passwords: <span class="metric">{shared_count}</span></p>
-        <p>Accounts with Policy Violations: <span class="metric">{len(metrics['policy_violations'])}</span></p>
+        <p>Unique Passwords: {metrics['unique_passwords_count']} | Unique Cracked: <span class="metric">{metrics['unique_cracked_count']}</span></p>
+        <p>Kerberoastable & Cracked: <span class="metric">{metrics['kerberoastable_cracked_count']}</span></p>
+        <p>ASREPRoastable & Cracked: <span class="metric">{metrics['asreproastable_cracked_count']}</span></p>
+        <p>High Value Accounts Cracked: <span class="metric">{metrics['high_value_cracked_count']}</span></p>
+        <p>Accounts with Password Not Required: <span class="metric">{metrics['passwordnotreqd_count']}</span></p>
+        <p>Accounts with Password Never Expires: <span class="metric">{metrics['pwdneverexpires_count']}</span></p>
+        <p>Accounts with LM Hashes: <span class="metric">{metrics['lm_hashes_count']}</span></p>
+        <p>Accounts Sharing Passwords: <span class="metric">{metrics['shared_passwords_count']}</span></p>
+        <p>Accounts with Policy Violations: <span class="metric">{metrics['policy_violations_count']}</span></p>
     </div>
 
     <div class="card">
@@ -512,100 +786,275 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
     """
     write_page("index.html", "Summary", index_content)
 
+    enabled_filter = "AND u.enabled = 1" if metrics.get('enabled_only_flag') else ""
+    pwd_col = "h.redacted_password" if redact else "h.cracked_password"
+
+    # --- Password Lengths Page ---
+    c.execute(f"""
+        SELECT length(cracked_password) as pw_len, cracked_password
+        FROM hashes h JOIN users u ON h.user_id = u.id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}
+        GROUP BY cracked_password
+        ORDER BY pw_len ASC
+        LIMIT 100
+    """)
+    shortest = c.fetchall()
+
+    c.execute(f"""
+        SELECT length(cracked_password) as pw_len, cracked_password
+        FROM hashes h JOIN users u ON h.user_id = u.id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}
+        GROUP BY cracked_password
+        ORDER BY pw_len DESC
+        LIMIT 100
+    """)
+    longest = c.fetchall()
+
+    def generate_length_table(title, table_id, select_id, data):
+        html_str = f'<div class="card"><h2>{title}</h2>'
+        html_str += f'<label for="{select_id}">Show rows: </label>'
+        html_str += f'<select id="{select_id}" onchange="toggleRows(\'{table_id}\', \'{select_id}\')">'
+        html_str += '<option value="10" selected>10</option>'
+        html_str += '<option value="25">25</option>'
+        html_str += '<option value="50">50</option>'
+        html_str += '<option value="100">100</option>'
+        html_str += '</select>'
+        html_str += f'<table id="{table_id}">'
+        html_str += '<tr><th>Length</th><th>Password</th></tr>'
+        for i, row in enumerate(data):
+            display_style = '' if i < 10 else 'style="display:none;"'
+            pw_val = ('*' * len(row[1]) if len(row[1]) <= 2 else row[1][0] + '*' * (len(row[1])-2) + row[1][-1]) if redact else row[1]
+            html_str += f'<tr class="data-row" {display_style}><td>{row[0]}</td><td>{html.escape(pw_val)}</td></tr>'
+        html_str += '</table></div>'
+        return html_str
+
+    lengths_content = generate_length_table("Top 100 Shortest Passwords", "shortTable", "shortSelect", shortest)
+    lengths_content += generate_length_table("Top 100 Longest Passwords", "longTable", "longSelect", longest)
+    write_page("lengths.html", "Password Lengths", lengths_content)
+
     # --- Shared Passwords Page ---
-    shared_rows = []
-    for nt_hash, user_list in metrics['shared_passwords'].items():
-        for u in user_list:
-            shared_rows.append([u.domain, u.username, get_pwd_display(u)])
-    write_page("shared.html", "Shared Passwords", generate_table("Shared Passwords", "sharedTable", ["Domain", "Username", "Password"], shared_rows))
+    q_shared_count = f"""
+        SELECT COUNT(*) FROM (
+            SELECT lower(h.nt_hash) FROM hashes h JOIN users u ON h.user_id = u.id
+            WHERE h.is_history = 0 {enabled_filter}
+            GROUP BY lower(h.nt_hash) HAVING COUNT(h.id) > 1
+        )
+    """
+    c.execute(q_shared_count)
+    total_shared_hashes = c.fetchone()[0]
+    total_shared_pages = math.ceil(total_shared_hashes / 1000)
+
+    if total_shared_pages == 0:
+        content = f'<div class="card"><h2>Shared Passwords</h2><p>No data available.</p></div>'
+        write_page("shared_1.html", "Shared Passwords", content)
+    else:
+        for page in range(1, total_shared_pages + 1):
+            offset = (page - 1) * 1000
+            # Get the distinct shared hashes
+            c.execute(f"""
+                SELECT lower(h.nt_hash), {pwd_col}, COUNT(h.id) as count
+                FROM hashes h JOIN users u ON h.user_id = u.id
+                WHERE h.is_history = 0 {enabled_filter}
+                GROUP BY lower(h.nt_hash) HAVING COUNT(h.id) > 1
+                ORDER BY count DESC
+                LIMIT 1000 OFFSET {offset}
+            """)
+            shared_page = c.fetchall()
+
+            shared_rows_html = ""
+            for i, row in enumerate(shared_page):
+                nt_hash = row[0]
+                pwd_display = html.escape(row[1] if row[1] else "")
+                hash_display = ('*' * 32 if redact else nt_hash)
+                count = row[2]
+
+                # Fetch users for this hash
+                c.execute(f"""
+                    SELECT u.domain, u.username
+                    FROM hashes h JOIN users u ON h.user_id = u.id
+                    WHERE lower(h.nt_hash) = ? AND h.is_history = 0 {enabled_filter}
+                    ORDER BY u.domain, u.username
+                """, (nt_hash,))
+                users_for_hash = c.fetchall()
+
+                row_id = f"hash_row_{page}_{i}"
+                shared_rows_html += f"""
+                    <tr>
+                        <td>{hash_display}</td>
+                        <td>{pwd_display}</td>
+                        <td>{count}</td>
+                        <td><a href="javascript:void(0);" onclick="toggleAccounts('{row_id}')">View Accounts</a></td>
+                    </tr>
+                    <tr id="{row_id}" class="ignore-filter" style="display:none; background-color: #f9f9f9;">
+                        <td colspan="4">
+                            <ul>
+                                {"".join(f"<li>{html.escape(u[0])}\\\\{html.escape(u[1])}</li>" for u in users_for_hash)}
+                            </ul>
+                        </td>
+                    </tr>
+                """
+
+            table_html = f"""
+            <div class="card">
+                <h2>Shared Passwords</h2>
+                <input type="text" id="sharedFilter" onkeyup="filterTable('sharedFilter', 'sharedTable')" placeholder="Filter by Hash, Password or Count...">
+                <table id="sharedTable">
+                    <tr><th>NT Hash</th><th>Password</th><th>Count</th><th>Action</th></tr>
+                    {shared_rows_html}
+                </table>
+            </div>
+            """
+
+            pagination = generate_pagination_html("shared", page, total_shared_pages)
+            final_content = pagination + table_html + pagination
+
+            write_page(f"shared_{page}.html", "Shared Passwords", final_content)
 
     # --- LM Hashes Page ---
-    lm_rows = [[u.domain, u.username, get_hash_display(u.current_hash.lm_hash)] for u in metrics['lm_hashes']]
-    write_page("lm_hashes.html", "Accounts with LM Hashes", generate_table("Accounts with LM Hashes", "lmTable", ["Domain", "Username", "LM Hash"], lm_rows))
+    q_lm_count = f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND lower(h.lm_hash) != 'aad3b435b51404eeaad3b435b51404ee' {enabled_filter}"
+    hash_col = "substr('********************************', 1, length(h.lm_hash))" if redact else "h.lm_hash"
+    q_lm = f"SELECT u.domain, u.username, {hash_col} FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND lower(h.lm_hash) != 'aad3b435b51404eeaad3b435b51404ee' {enabled_filter} ORDER BY u.domain, u.username"
+    generate_paginated_pages("lm_hashes", "Accounts with LM Hashes", ["Domain", "Username", "LM Hash"], q_lm, q_lm_count)
 
     # --- Policy Violations Page ---
-    pv_rows = [[item['user'].domain, item['user'].username, get_pwd_display(item['user']), item['reason']] for item in metrics['policy_violations']]
-    write_page("policy.html", "Policy Violations", generate_table("Policy Violations", "pvTable", ["Domain", "Username", "Password", "Reason"], pv_rows))
+    q_pv_count = f"SELECT COUNT(*) FROM policy_violations pv JOIN users u ON pv.user_id = u.id WHERE 1=1 {enabled_filter}"
+    q_pv = f"""
+        SELECT u.domain, u.username, {pwd_col}, pv.reason
+        FROM policy_violations pv
+        JOIN users u ON pv.user_id = u.id
+        JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
+        WHERE 1=1 {enabled_filter}
+        ORDER BY u.domain, u.username
+    """
+    generate_paginated_pages("policy", "Policy Violations", ["Domain", "Username", "Password", "Reason"], q_pv, q_pv_count)
 
     # --- High Value Page ---
-    hvc_rows = [[u.domain, u.username, get_pwd_display(u)] for u in metrics['high_value_cracked']]
-    write_page("high_value.html", "High Value Accounts", generate_table("High Value Accounts Cracked", "hvcTable", ["Domain", "Username", "Password"], hvc_rows))
+    hv_placeholders = ','.join('?' * len(high_value_groups))
+    hv_params = [g.lower() for g in high_value_groups]
+    q_hv_count = f"""
+        SELECT COUNT(DISTINCT u.id)
+        FROM users u
+        JOIN hashes h ON u.id = h.user_id
+        JOIN user_groups ug ON u.id = ug.user_id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
+        AND lower(ug.group_name) IN ({hv_placeholders}) {enabled_filter}
+    """
+    q_hv = f"""
+        SELECT DISTINCT u.domain, u.username, {pwd_col}
+        FROM users u
+        JOIN hashes h ON u.id = h.user_id
+        JOIN user_groups ug ON u.id = ug.user_id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
+        AND lower(ug.group_name) IN ({hv_placeholders}) {enabled_filter}
+        ORDER BY u.domain, u.username
+    """
+    generate_paginated_pages("high_value", "High Value Accounts", ["Domain", "Username", "Password"], q_hv, q_hv_count, tuple(hv_params))
 
     # --- Kerberoastable Page ---
-    kc_rows = [[u.domain, u.username, get_pwd_display(u)] for u in metrics['kerberoastable_cracked']]
-    write_page("kerberoastable.html", "Kerberoastable", generate_table("Kerberoastable & Cracked", "kcTable", ["Domain", "Username", "Password"], kc_rows))
+    q_kerb_count = f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.kerberoastable = 1 {enabled_filter}"
+    q_kerb = f"SELECT u.domain, u.username, {pwd_col} FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.kerberoastable = 1 {enabled_filter} ORDER BY u.domain, u.username"
+    generate_paginated_pages("kerberoastable", "Kerberoastable & Cracked", ["Domain", "Username", "Password"], q_kerb, q_kerb_count)
 
     # --- ASREPRoastable Page ---
-    ac_rows = [[u.domain, u.username, get_pwd_display(u)] for u in metrics['asreproastable_cracked']]
-    write_page("asreproastable.html", "ASREPRoastable", generate_table("ASREPRoastable & Cracked", "acTable", ["Domain", "Username", "Password"], ac_rows))
+    q_asrep_count = f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.asreproastable = 1 {enabled_filter}"
+    q_asrep = f"SELECT u.domain, u.username, {pwd_col} FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.asreproastable = 1 {enabled_filter} ORDER BY u.domain, u.username"
+    generate_paginated_pages("asreproastable", "ASREPRoastable & Cracked", ["Domain", "Username", "Password"], q_asrep, q_asrep_count)
 
     # --- Flags Page ---
-    pne_rows = [[u.domain, u.username] for u in metrics['pwdneverexpires']]
-    flags_content = generate_table("Password Never Expires", "pneTable", ["Domain", "Username"], pne_rows)
-    pnr_rows = [[u.domain, u.username] for u in metrics['passwordnotreqd']]
-    flags_content += generate_table("Password Not Required", "pnrTable", ["Domain", "Username"], pnr_rows)
-    write_page("flags.html", "Account Flags", flags_content)
+    q_flags_count = f"SELECT COUNT(*) FROM users u WHERE (u.pwdneverexpires = 1 OR u.passwordnotreqd = 1) {enabled_filter}"
+    q_flags = f"""
+        SELECT u.domain, u.username,
+               CASE WHEN u.pwdneverexpires = 1 THEN 'Yes' ELSE 'No' END,
+               CASE WHEN u.passwordnotreqd = 1 THEN 'Yes' ELSE 'No' END
+        FROM users u
+        WHERE (u.pwdneverexpires = 1 OR u.passwordnotreqd = 1) {enabled_filter}
+        ORDER BY u.domain, u.username
+    """
+    generate_paginated_pages("flags", "Account Flags", ["Domain", "Username", "Password Never Expires", "Password Not Required"], q_flags, q_flags_count)
 
     # --- History Page ---
-    # Find max history length
-    max_history = 0
-    for key, user in users.items():
-        if metrics.get('enabled_only_flag') and not user.enabled:
-            continue
-        hist_hashes = [h for h in user.hashes if h.is_history]
-        if len(hist_hashes) > max_history:
-            max_history = len(hist_hashes)
+    # We find max history dynamically by querying the database for max history hashes for a user
+    c.execute(f"SELECT MAX(hist_count) FROM (SELECT user_id, COUNT(*) as hist_count FROM hashes JOIN users u ON user_id = u.id WHERE is_history = 1 {enabled_filter} GROUP BY user_id)")
+    row = c.fetchone()
+    max_history = row[0] if row and row[0] else 0
 
-    # Generate headers
-    history_headers = "<tr><th>Domain</th><th>Username</th><th>Current</th>"
+    history_headers = ["Domain", "Username", "Current"]
     for i in range(1, max_history + 1):
-        history_headers += f"<th>History {i}</th>"
-    history_headers += "</tr>"
+        history_headers.append(f"History {i}")
 
-    history_rows = ""
-    for key, user in users.items():
-        if metrics.get('enabled_only_flag') and not user.enabled:
-            continue
+    # Generate custom query for history
+    q_hist_count = f"SELECT COUNT(DISTINCT u.id) FROM users u WHERE 1=1 {enabled_filter}"
+    c.execute(q_hist_count)
+    total_users = c.fetchone()[0]
+    total_pages = math.ceil(total_users / 1000)
 
-        e_dom = html.escape(user.domain)
-        e_usr = html.escape(user.username)
+    if total_pages == 0:
+        content = f'<div class="card"><h2>Password History</h2><p>No data available.</p></div>'
+        write_page("history_1.html", "Password History", content)
+    else:
+        for page in range(1, total_pages + 1):
+            offset = (page - 1) * 1000
 
-        # Current hash
-        curr_hash = user.current_hash
-        curr_display = ""
-        if curr_hash and curr_hash.cracked_password:
-            curr_display = redact_string(curr_hash.cracked_password) if redact else curr_hash.cracked_password
-        curr_display = html.escape(curr_display)
+            c.execute(f"SELECT id, domain, username FROM users u WHERE 1=1 {enabled_filter} ORDER BY domain, username LIMIT 1000 OFFSET {offset}")
+            users_page = c.fetchall()
 
-        row_html = f"<tr><td>{e_dom}</td><td>{e_usr}</td><td>{curr_display}</td>"
+            user_ids = [u[0] for u in users_page]
+            if not user_ids:
+                continue
 
-        hist_hashes = [h for h in user.hashes if h.is_history]
-        # Depending on NTDS extraction, they might not be perfectly ordered, but we append them in sequence
-        for i in range(max_history):
-            if i < len(hist_hashes):
-                h = hist_hashes[i]
-                h_display = ""
-                if h.cracked_password:
-                    h_display = redact_string(h.cracked_password) if redact else h.cracked_password
-                row_html += f"<td>{html.escape(h_display)}</td>"
-            else:
-                row_html += "<td></td>"
+            placeholders = ','.join('?' * len(user_ids))
+            # Get current hashes
+            c.execute(f"SELECT user_id, {pwd_col} FROM hashes h WHERE is_history = 0 AND user_id IN ({placeholders})", user_ids)
+            current_hashes = {r[0]: r[1] for r in c.fetchall()}
 
-        row_html += "</tr>"
-        history_rows += row_html
+            # Get history hashes
+            c.execute(f"SELECT user_id, {pwd_col} FROM hashes h WHERE is_history = 1 AND user_id IN ({placeholders}) ORDER BY user_id, id", user_ids)
+            hist_hashes = {}
+            for r in c.fetchall():
+                uid = r[0]
+                if uid not in hist_hashes:
+                    hist_hashes[uid] = []
+                hist_hashes[uid].append(r[1])
 
-    history_content = f"""
-    <div class="card">
-        <h2>User Password History</h2>
-        <input type="text" id="histFilter" onkeyup="filterTable('histFilter', 'histTable')" placeholder="Filter by Domain or Username...">
-        <table id="histTable">
-            {history_headers}
-            {history_rows}
-        </table>
-    </div>
-    """
-    write_page("history.html", "Password History", history_content)
+            history_rows_html = ""
+            for uid, domain, username in users_page:
+                e_dom = html.escape(domain)
+                e_usr = html.escape(username)
 
+                curr = current_hashes.get(uid, "")
+                curr_display = html.escape(curr if curr else "")
+
+                row_html = f"<tr><td>{e_dom}</td><td>{e_usr}</td><td>{curr_display}</td>"
+
+                h_list = hist_hashes.get(uid, [])
+                for i in range(max_history):
+                    if i < len(h_list):
+                        h_val = h_list[i]
+                        h_display = html.escape(h_val if h_val else "")
+                        row_html += f"<td>{h_display}</td>"
+                    else:
+                        row_html += "<td></td>"
+
+                row_html += "</tr>"
+                history_rows_html += row_html
+
+            table_html = f"""
+            <div class="card">
+                <h2>User Password History</h2>
+                <input type="text" id="histFilter" onkeyup="filterTable('histFilter', 'histTable')" placeholder="Filter by Domain or Username...">
+                <table id="histTable">
+                    <tr>{"".join(f"<th>{h}</th>" for h in history_headers)}</tr>
+                    {history_rows_html}
+                </table>
+            </div>
+            """
+
+            pagination = generate_pagination_html("history", page, total_pages)
+            final_content = pagination + table_html + pagination
+
+            write_page(f"history_{page}.html", "Password History", final_content)
+
+    conn.close()
     logging.info(f"Reports generated successfully in directory: {output_dir}/")
 
 
@@ -613,23 +1062,34 @@ def main():
     args = parse_args()
     logging.info("Starting analysis...")
 
-    cracked = parse_potfile(args.potfile)
-    logging.info(f"Loaded {len(cracked)} cracked hashes from potfile.")
+    db_path = "analysis.db"
+    if os.path.exists(db_path):
+        os.remove(db_path)
 
-    users = parse_ntds(args.ntds, cracked)
-    logging.info(f"Parsed {len(users)} users from NTDS.")
+    init_db(db_path)
+
+    parse_potfile(args.potfile, db_path)
+    logging.info("Loaded cracked hashes from potfile into DB.")
+
+    parse_ntds(args.ntds, db_path)
+    logging.info("Parsed users and hashes from NTDS into DB.")
 
     if args.bloodhound:
-        parse_bloodhound(args.bloodhound, users)
-        logging.info("Parsed Bloodhound data.")
+        parse_bloodhound(args.bloodhound, db_path)
+        logging.info("Parsed Bloodhound data into DB.")
 
     high_value_groups = parse_high_value(args.high_value)
     policy = parse_policy(args.policy)
 
-    metrics = calculate_metrics(users, high_value_groups, policy, args.redact, args.enabled_only)
+    metrics = calculate_metrics(db_path, high_value_groups, policy, args.redact, args.enabled_only)
     logging.info("Metrics calculated.")
 
-    generate_html_report(metrics, users, args.redact, args.outdir)
+    generate_html_report(db_path, metrics, high_value_groups, args.redact, args.outdir)
+
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+    logging.info("Analysis complete.")
 
 if __name__ == '__main__':
     main()
