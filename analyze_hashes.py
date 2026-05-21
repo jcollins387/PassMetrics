@@ -287,14 +287,13 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
             metrics['asreproastable_cracked'].append(user)
 
         # High value targets
-        # Assuming for now bloodhound might populate user.groups, but we check if they are in the lists
         is_high_value = False
+        high_value_groups_lower = [g.lower() for g in high_value_groups]
         for grp in user.groups:
-            if grp in high_value_groups:
+            if grp.lower() in high_value_groups_lower:
                 is_high_value = True
                 break
-        # Fallback if no bloodhound groups are parsed but we want to simulate or check
-        # In a real scenario we'd need full group resolution. We'll mark them if they match.
+
         if is_high_value and current_hash.cracked_password:
             metrics['high_value_cracked'].append(user)
 
@@ -316,8 +315,10 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
             fgpp_policies = policy.get('fgpp', {})
 
             # Check for FGPP matching user's groups
+            # Use lowercase for case-insensitive matching
+            user_groups_lower = [g.lower() for g in user.groups]
             for group, g_policy in fgpp_policies.items():
-                if group in user.groups:
+                if group.lower() in user_groups_lower:
                     applicable_policy = g_policy
                     break
 
@@ -546,28 +547,59 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
     write_page("flags.html", "Account Flags", flags_content)
 
     # --- History Page ---
+    # Find max history length
+    max_history = 0
+    for key, user in users.items():
+        if metrics.get('enabled_only_flag') and not user.enabled:
+            continue
+        hist_hashes = [h for h in user.hashes if h.is_history]
+        if len(hist_hashes) > max_history:
+            max_history = len(hist_hashes)
+
+    # Generate headers
+    history_headers = "<tr><th>Domain</th><th>Username</th><th>Current</th>"
+    for i in range(1, max_history + 1):
+        history_headers += f"<th>History {i}</th>"
+    history_headers += "</tr>"
+
     history_rows = ""
     for key, user in users.items():
         if metrics.get('enabled_only_flag') and not user.enabled:
             continue
 
-        for h in user.hashes:
-            if redact and h.cracked_password:
-                display_pwd = redact_string(h.cracked_password)
+        e_dom = html.escape(user.domain)
+        e_usr = html.escape(user.username)
+
+        # Current hash
+        curr_hash = user.current_hash
+        curr_display = ""
+        if curr_hash and curr_hash.cracked_password:
+            curr_display = redact_string(curr_hash.cracked_password) if redact else curr_hash.cracked_password
+        curr_display = html.escape(curr_display)
+
+        row_html = f"<tr><td>{e_dom}</td><td>{e_usr}</td><td>{curr_display}</td>"
+
+        hist_hashes = [h for h in user.hashes if h.is_history]
+        # Depending on NTDS extraction, they might not be perfectly ordered, but we append them in sequence
+        for i in range(max_history):
+            if i < len(hist_hashes):
+                h = hist_hashes[i]
+                h_display = ""
+                if h.cracked_password:
+                    h_display = redact_string(h.cracked_password) if redact else h.cracked_password
+                row_html += f"<td>{html.escape(h_display)}</td>"
             else:
-                display_pwd = h.cracked_password
-            e_dom = html.escape(user.domain)
-            e_usr = html.escape(user.username)
-            e_hash = html.escape(get_hash_display(h.nt_hash))
-            e_pwd = html.escape(display_pwd or '')
-            history_rows += f"<tr><td>{e_dom}</td><td>{e_usr}</td><td>{e_hash}</td><td>{e_pwd}</td><td>{'Yes' if h.is_history else 'No'}</td></tr>"
+                row_html += "<td></td>"
+
+        row_html += "</tr>"
+        history_rows += row_html
 
     history_content = f"""
     <div class="card">
         <h2>User Password History</h2>
         <input type="text" id="histFilter" onkeyup="filterTable('histFilter', 'histTable')" placeholder="Filter by Domain or Username...">
         <table id="histTable">
-            <tr><th>Domain</th><th>Username</th><th>NT Hash</th><th>Cracked Password</th><th>Is History</th></tr>
+            {history_headers}
             {history_rows}
         </table>
     </div>
