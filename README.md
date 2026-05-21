@@ -54,6 +54,10 @@ python analyze_hashes.py \
 ```
 *Note: The `--redact` flag will redact the cracked passwords in the database and web reports.*
 
+**Using the Example Files:**
+- `example_policy.json`: A sample password policy definition. You can modify it to match your organization's required base password length/complexity, and define Fine-Grained Password Policies (FGPP) for specific groups (e.g., Domain Admins). Pass this file with the `--policy` flag to calculate policy violations.
+- `example_high_value_groups.txt`: A sample list of high value groups (one per line). Pass this file with the `--high-value` flag to track and filter cracked accounts belonging to these groups in the web report.
+
 ### 5. Viewing the Reports
 After `analyze_hashes.py` finishes, it will generate an SQLite database named `analysis.db`.
 You can view the interactive reports using the Flask web portal.
