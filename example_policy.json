@@ -1,20 +1,24 @@
 {
   "base": {
     "length": 8,
-    "complexity": true
+    "complexity": true,
+    "lifetime": 90
   },
   "fgpp": {
     "Domain Admins": {
       "length": 14,
-      "complexity": true
+      "complexity": true,
+      "lifetime": 30
     },
     "Enterprise Admins": {
       "length": 14,
-      "complexity": true
+      "complexity": true,
+      "lifetime": 30
     },
-    "ServiceAccounts": {
+    "OU=SERVICEACCOUNTS,DC=PRIMARY,DC=DOMAIN,DC=COM": {
       "length": 20,
-      "complexity": false
+      "complexity": false,
+      "lifetime": 365
     }
   }
 }
