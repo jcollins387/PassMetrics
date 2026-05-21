@@ -70,8 +70,14 @@ def parse_potfile(potfile_path: str) -> Dict[str, str]:
 def parse_ntds(ntds_path: str, cracked: Dict[str, str]) -> Dict[str, UserData]:
     """Parses NTDS dump, skips krbtgt/machine accounts, returns dict mapped by domain\\username."""
     users: Dict[str, UserData] = {}
+    logging.info(f"Parsing NTDS file: {ntds_path}")
+    count = 0
     with open(ntds_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
+            count += 1
+            if count % 100000 == 0:
+                logging.info(f"Processed {count} lines from NTDS...")
+
             line = line.strip()
             if not line:
                 continue
@@ -125,7 +131,15 @@ def parse_ntds(ntds_path: str, cracked: Dict[str, str]) -> Dict[str, UserData]:
 
 def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
     """Parses bloodhound users JSON and group memberships."""
+    # Pre-compute username fallback index to avoid O(N^2) lookups
+    fallback_index = {}
+    for k in users.keys():
+        parts = k.split('\\')
+        if len(parts) > 1:
+            fallback_index[parts[1].lower()] = k
+
     for bh_file in bh_files:
+        logging.info(f"Parsing Bloodhound file: {bh_file}")
         with open(bh_file, 'r', encoding='utf-8') as f:
             try:
                 data = json.load(f)
@@ -136,7 +150,11 @@ def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
             if 'data' not in data:
                 continue
 
-            for item in data['data']:
+            total_items = len(data['data'])
+            for i, item in enumerate(data['data']):
+                if (i + 1) % 10000 == 0:
+                    logging.info(f"Processed {i + 1}/{total_items} items from {bh_file}...")
+
                 item_type = item.get('type', item.get('Type', '')).upper()
                 props = item.get('Properties', {})
 
@@ -151,9 +169,9 @@ def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
                     # Check if we have this user from NTDS
                     matched_user = users.get(key)
                     if not matched_user:
-                        fallback_keys = [k for k in users.keys() if k.split('\\')[1].lower() == samaccountname.lower()]
-                        if len(fallback_keys) == 1:
-                            matched_user = users[fallback_keys[0]]
+                        fallback_key = fallback_index.get(samaccountname.lower())
+                        if fallback_key:
+                            matched_user = users.get(fallback_key)
 
                     if matched_user:
                         matched_user.enabled = props.get('enabled', True)
@@ -177,9 +195,9 @@ def parse_bloodhound(bh_files: List[str], users: Dict[str, UserData]):
                                 u_key = f"{m_dom}\\{m_user}".lower()
                                 matched = users.get(u_key)
                                 if not matched:
-                                    f_keys = [k for k in users.keys() if k.split('\\')[1].lower() == m_user.lower()]
-                                    if len(f_keys) == 1:
-                                        matched = users[f_keys[0]]
+                                    fallback_key = fallback_index.get(m_user.lower())
+                                    if fallback_key:
+                                        matched = users.get(fallback_key)
                                 if matched and group_name:
                                     matched.groups.add(group_name)
 
@@ -233,7 +251,8 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
         'shared_passwords': {}, # mapping of nt_hash -> list of users
         'pwdneverexpires': [],
         'passwordnotreqd': [],
-        'password_lengths': {}
+        'password_lengths': {},
+        'enabled_only_flag': enabled_only
     }
 
     # Pre-filter accounts
@@ -244,8 +263,12 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
         active_users.append(user)
 
     metrics['total_accounts'] = len(active_users)
+    logging.info(f"Calculating metrics for {len(active_users)} active users...")
 
-    for user in active_users:
+    for i, user in enumerate(active_users):
+        if (i + 1) % 10000 == 0:
+            logging.info(f"Calculated metrics for {i + 1}/{len(active_users)} users...")
+
         current_hash = user.current_hash
         if not current_hash:
             continue
@@ -497,7 +520,13 @@ def generate_html_report(metrics: Dict, users: Dict[str, UserData], redact: bool
 
     # History Table
     history_rows = ""
+
+    # Pre-filter accounts for history to respect enabled_only flag if metrics has active accounts conceptually
+    # but metrics function didn't return active_users. We can determine it here or pass it.
     for key, user in users.items():
+        if metrics.get('enabled_only_flag') and not user.enabled:
+            continue
+
         for h in user.hashes:
             # When redacting history hashes, we need to redact explicitly since we might not have run redact_string on history hashes in metrics calc
             if redact and h.cracked_password:
