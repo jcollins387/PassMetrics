@@ -79,11 +79,18 @@ def init_db(db_path: str):
             reason TEXT,
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
 
         CREATE INDEX IF NOT EXISTS idx_users_domain_username ON users(domain, username);
+        CREATE INDEX IF NOT EXISTS idx_users_flags ON users(enabled, kerberoastable, asreproastable);
         CREATE INDEX IF NOT EXISTS idx_hashes_user_id ON hashes(user_id);
         CREATE INDEX IF NOT EXISTS idx_hashes_nt_hash ON hashes(nt_hash);
+        CREATE INDEX IF NOT EXISTS idx_hashes_nt_hash_lower ON hashes(lower(nt_hash));
         CREATE INDEX IF NOT EXISTS idx_hashes_is_history ON hashes(is_history);
+        CREATE INDEX IF NOT EXISTS idx_hashes_history_cracked ON hashes(is_history, cracked_password);
         CREATE INDEX IF NOT EXISTS idx_user_groups_user_id ON user_groups(user_id);
     ''')
     conn.commit()
@@ -420,116 +427,25 @@ def redact_string(value: str) -> str:
         return '*' * len(value)
     return value[0] + '*' * (len(value) - 2) + value[-1]
 
-def calculate_metrics(db_path: str, high_value_groups: List[str], policy: Dict, redact: bool, enabled_only: bool) -> Dict:
-    logging.info("Calculating metrics using SQLite...")
+def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bool):
+    logging.info("Calculating policy violations and database setup...")
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
     enabled_filter = "AND u.enabled = 1" if enabled_only else ""
 
-    metrics = {
-        'total_accounts': 0,
-        'total_passwords': 0,
-        'total_cracked': 0,
-        'unique_passwords_count': 0,
-        'unique_cracked_count': 0,
-        'kerberoastable_cracked_count': 0,
-        'asreproastable_cracked_count': 0,
-        'high_value_cracked_count': 0,
-        'pwdneverexpires_count': 0,
-        'passwordnotreqd_count': 0,
-        'lm_hashes_count': 0,
-        'shared_passwords_count': 0,
-        'policy_violations_count': 0,
-        'password_lengths': {},
-        'enabled_only_flag': enabled_only
-    }
-
-    # Redact cracked passwords in the DB if requested
+    # Redact cracked passwords directly in the cracked_password column
     if redact:
         logging.info("Redacting passwords in DB...")
         c.execute("""
             UPDATE hashes
-            SET redacted_password = CASE
+            SET cracked_password = CASE
                 WHEN length(cracked_password) <= 2 THEN substr('********************************', 1, length(cracked_password))
                 ELSE substr(cracked_password, 1, 1) || substr('********************************', 1, length(cracked_password)-2) || substr(cracked_password, -1, 1)
             END
             WHERE cracked_password IS NOT NULL
         """)
         conn.commit()
-
-    # Totals
-    c.execute(f"SELECT COUNT(*) FROM users u WHERE 1=1 {enabled_filter}")
-    metrics['total_accounts'] = c.fetchone()[0]
-
-    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 {enabled_filter}")
-    metrics['total_passwords'] = c.fetchone()[0]
-
-    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}")
-    metrics['total_cracked'] = c.fetchone()[0]
-
-    c.execute(f"SELECT COUNT(DISTINCT lower(h.nt_hash)) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 {enabled_filter}")
-    metrics['unique_passwords_count'] = c.fetchone()[0]
-
-    c.execute(f"SELECT COUNT(DISTINCT h.cracked_password) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}")
-    metrics['unique_cracked_count'] = c.fetchone()[0]
-
-    # Roastable cracked
-    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.kerberoastable = 1 {enabled_filter}")
-    metrics['kerberoastable_cracked_count'] = c.fetchone()[0]
-
-    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.asreproastable = 1 {enabled_filter}")
-    metrics['asreproastable_cracked_count'] = c.fetchone()[0]
-
-    # High Value cracked
-    hv_placeholders = ','.join('?' * len(high_value_groups))
-    hv_params = [g.lower() for g in high_value_groups]
-    c.execute(f"""
-        SELECT COUNT(DISTINCT u.id)
-        FROM users u
-        JOIN hashes h ON u.id = h.user_id
-        JOIN user_groups ug ON u.id = ug.user_id
-        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
-        AND lower(ug.group_name) IN ({hv_placeholders}) {enabled_filter}
-    """, hv_params)
-    metrics['high_value_cracked_count'] = c.fetchone()[0]
-
-    # Flags
-    c.execute(f"SELECT COUNT(*) FROM users u WHERE u.pwdneverexpires = 1 {enabled_filter}")
-    metrics['pwdneverexpires_count'] = c.fetchone()[0]
-
-    c.execute(f"SELECT COUNT(*) FROM users u WHERE u.passwordnotreqd = 1 {enabled_filter}")
-    metrics['passwordnotreqd_count'] = c.fetchone()[0]
-
-    # LM Hashes
-    c.execute(f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND lower(h.lm_hash) != 'aad3b435b51404eeaad3b435b51404ee' {enabled_filter}")
-    metrics['lm_hashes_count'] = c.fetchone()[0]
-
-    # Shared Passwords
-    c.execute(f"""
-        SELECT COUNT(*) FROM (
-            SELECT lower(h.nt_hash) FROM hashes h JOIN users u ON h.user_id = u.id
-            WHERE h.is_history = 0 {enabled_filter}
-            GROUP BY lower(h.nt_hash) HAVING COUNT(h.id) > 1
-        )
-    """)
-    shared_hashes_count = c.fetchone()[0]
-
-    # We want the total accounts sharing passwords, not just the number of unique shared hashes
-    c.execute(f"""
-        SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id
-        WHERE h.is_history = 0 {enabled_filter} AND lower(h.nt_hash) IN (
-            SELECT lower(h2.nt_hash) FROM hashes h2 JOIN users u2 ON h2.user_id = u2.id
-            WHERE h2.is_history = 0 {enabled_filter}
-            GROUP BY lower(h2.nt_hash) HAVING COUNT(h2.id) > 1
-        )
-    """)
-    metrics['shared_passwords_count'] = c.fetchone()[0]
-
-    # Password Lengths
-    c.execute(f"SELECT length(h.cracked_password), COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter} GROUP BY length(h.cracked_password)")
-    for row in c.fetchall():
-        metrics['password_lengths'][row[0]] = row[1]
 
     # Policy Violations
     logging.info("Calculating policy violations...")
@@ -543,13 +459,13 @@ def calculate_metrics(db_path: str, high_value_groups: List[str], policy: Dict, 
     """)
 
     violations = []
-    fgpp_policies = policy.get('fgpp', {})
-    base_policy = policy.get('base', {})
+    fgpp_policies = policy.get("fgpp", {})
+    base_policy = policy.get("base", {})
 
     for row in c.fetchall():
         user_id = row[0]
         pwd = row[1]
-        user_groups_lower = row[2].split(',') if row[2] else []
+        user_groups_lower = row[2].split(",") if row[2] else []
 
         applicable_policy = base_policy
         for group, g_policy in fgpp_policies.items():
@@ -558,8 +474,8 @@ def calculate_metrics(db_path: str, high_value_groups: List[str], policy: Dict, 
                 break
 
         if applicable_policy:
-            min_len = applicable_policy.get('length', 0)
-            req_complexity = applicable_policy.get('complexity', False)
+            min_len = applicable_policy.get("length", 0)
+            req_complexity = applicable_policy.get("complexity", False)
 
             reasons = []
             if len(pwd) < min_len:
@@ -580,482 +496,10 @@ def calculate_metrics(db_path: str, high_value_groups: List[str], policy: Dict, 
         c.executemany("INSERT INTO policy_violations (user_id, reason) VALUES (?, ?)", violations)
         conn.commit()
 
-    metrics['policy_violations_count'] = len(violations)
-
     conn.close()
-    return metrics
 
 import os
 import time
-
-def generate_html_report(db_path: str, metrics: Dict, high_value_groups: List[str], redact: bool, output_dir: Optional[str] = None):
-    logging.info("Generating HTML reports...")
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-
-    if not output_dir:
-        timestamp = int(time.time())
-        output_dir = f"report_{timestamp}"
-
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    base_html_template = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Password Analysis Report</title>
-<style>
-    body {{ font-family: Arial, sans-serif; background: #f4f4f4; color: #333; margin: 20px; }}
-    h1, h2, h3 {{ color: #444; }}
-    .card {{ background: #fff; padding: 20px; margin-bottom: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
-    .metric {{ font-size: 24px; font-weight: bold; color: #d9534f; }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-    th {{ background: #eee; cursor: pointer; }}
-    .bar-chart {{ display: flex; align-items: flex-end; height: 200px; gap: 10px; border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-top: 20px; }}
-    .bar-col {{ display: flex; flex-direction: column; align-items: center; justify-content: flex-end; width: 40px; }}
-    .bar {{ background: #5cb85c; width: 30px; text-align: center; color: white; font-size: 10px; border-radius: 3px 3px 0 0; }}
-    .bar-label {{ margin-top: 5px; font-size: 12px; }}
-    input[type="text"] {{ padding: 5px; margin-bottom: 10px; width: 100%; max-width: 300px; }}
-    nav {{ background: #fff; padding: 10px; margin-bottom: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
-    nav a {{ margin-right: 15px; text-decoration: none; color: #337ab7; font-weight: bold; }}
-    nav a:hover {{ text-decoration: underline; }}
-    .pagination {{ margin-top: 15px; text-align: center; }}
-    .pagination a {{ text-decoration: none; padding: 5px 10px; background: #337ab7; color: #fff; border-radius: 3px; margin: 0 5px; }}
-    .pagination a:hover {{ background: #23527c; }}
-    .pagination span {{ padding: 5px 10px; margin: 0 5px; }}
-</style>
-<script>
-    function filterTable(inputId, tableId) {{
-        var input, filter, table, tr, td, i, j, txtValue;
-        input = document.getElementById(inputId);
-        filter = input.value.toUpperCase();
-        table = document.getElementById(tableId);
-        tr = table.getElementsByTagName("tr");
-        // start at 1 to skip header, but check if row has class ignore-filter
-        for (i = 1; i < tr.length; i++) {{
-            if (tr[i].classList.contains('ignore-filter')) continue;
-            tr[i].style.display = "none";
-            td = tr[i].getElementsByTagName("td");
-            for (j = 0; j < td.length; j++) {{
-                if (td[j]) {{
-                    txtValue = td[j].textContent || td[j].innerText;
-                    if (txtValue.toUpperCase().indexOf(filter) > -1) {{
-                        tr[i].style.display = "";
-                        break;
-                    }}
-                }}
-            }}
-        }}
-    }}
-
-    function toggleRows(tableId, selectId) {{
-        var select = document.getElementById(selectId);
-        var num = parseInt(select.value, 10);
-        var table = document.getElementById(tableId);
-        var trs = table.getElementsByClassName('data-row');
-        for (var i = 0; i < trs.length; i++) {{
-            if (i < num) {{
-                trs[i].style.display = '';
-            }} else {{
-                trs[i].style.display = 'none';
-            }}
-        }}
-    }}
-
-    function toggleAccounts(hashId) {{
-        var row = document.getElementById(hashId);
-        if (row.style.display === 'none' || row.style.display === '') {{
-            row.style.display = 'table-row';
-        }} else {{
-            row.style.display = 'none';
-        }}
-    }}
-</script>
-</head>
-<body>
-    <nav>
-        <a href="index.html">Summary</a>
-        <a href="lengths.html">Password Lengths</a>
-        <a href="shared.html">Shared Passwords</a>
-        <a href="lm_hashes.html">LM Hashes</a>
-        <a href="policy.html">Policy Violations</a>
-        <a href="high_value.html">High Value</a>
-        <a href="kerberoastable.html">Kerberoastable</a>
-        <a href="asreproastable.html">ASREPRoastable</a>
-        <a href="flags.html">Account Flags</a>
-        <a href="history.html">Password History</a>
-    </nav>
-    <h1>Password Analysis Report: {page_title}</h1>
-
-    {content}
-
-</body>
-</html>"""
-
-    # Generate Length Bars
-    lengths = metrics['password_lengths']
-    max_count = max(lengths.values()) if lengths else 1
-    bars_html = ""
-    for length in sorted(lengths.keys()):
-        count = lengths[length]
-        height_px = max(10, int((count / max_count) * 180)) # max height 180px
-        bars_html += f'<div class="bar-col"><div class="bar" style="height:{height_px}px" title="{count} passwords">{count}</div><div class="bar-label">{length}</div></div>'
-
-    def write_page(filename, title, content):
-        path = os.path.join(output_dir, filename)
-        final_html = base_html_template.format(page_title=title, content=content)
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(final_html)
-
-    def generate_pagination_html(base_name, current_page, total_pages):
-        if total_pages <= 1:
-            return ""
-
-        html_out = '<div class="pagination">'
-        if current_page > 1:
-            html_out += f'<a href="{base_name}_{current_page - 1}.html">Previous</a>'
-        html_out += f'<span>Page {current_page} of {total_pages}</span>'
-        if current_page < total_pages:
-            html_out += f'<a href="{base_name}_{current_page + 1}.html">Next</a>'
-        html_out += '</div>'
-        return html_out
-
-    def generate_paginated_pages(base_name, title, headers, query, count_query, params=(), rows_per_page=1000):
-        c.execute(count_query, params)
-        total_rows = c.fetchone()[0]
-        total_pages = math.ceil(total_rows / rows_per_page)
-
-        if total_pages == 0:
-            content = f'<div class="card"><h2>{title}</h2><p>No data available.</p></div>'
-            write_page(f"{base_name}_1.html", title, content)
-            return
-
-        for page in range(1, total_pages + 1):
-            offset = (page - 1) * rows_per_page
-
-            # Since limit and offset can't easily be parameterized with the exact array size in sqlite in the same way, we append them
-            page_query = query + f" LIMIT {rows_per_page} OFFSET {offset}"
-            c.execute(page_query, params)
-            rows = c.fetchall()
-
-            table_html = f'<div class="card"><h2>{title}</h2>'
-            table_id = f"{base_name}Table"
-            table_html += f'<input type="text" id="{table_id}Filter" onkeyup="filterTable(\'{table_id}Filter\', \'{table_id}\')" placeholder="Filter...">'
-            table_html += f'<table id="{table_id}"><tr>'
-            for h in headers:
-                table_html += f'<th>{h}</th>'
-            table_html += '</tr>'
-            for row in rows:
-                table_html += '<tr>'
-                for cell in row:
-                    escaped_cell = html.escape(str(cell)) if cell is not None else ''
-                    table_html += f'<td>{escaped_cell}</td>'
-                table_html += '</tr>'
-            table_html += '</table></div>'
-
-            pagination = generate_pagination_html(base_name, page, total_pages)
-            final_content = pagination + table_html + pagination
-
-            write_page(f"{base_name}_{page}.html", title, final_content)
-
-    # --- Index Page ---
-    index_content = f"""
-    <div class="card">
-        <h2>Summary Metrics</h2>
-        <p>Total Evaluated Accounts: <span class="metric">{metrics['total_accounts']}</span></p>
-        <p>Total Passwords: {metrics['total_passwords']} | Total Cracked: <span class="metric">{metrics['total_cracked']}</span></p>
-        <p>Unique Passwords: {metrics['unique_passwords_count']} | Unique Cracked: <span class="metric">{metrics['unique_cracked_count']}</span></p>
-        <p>Kerberoastable & Cracked: <span class="metric">{metrics['kerberoastable_cracked_count']}</span></p>
-        <p>ASREPRoastable & Cracked: <span class="metric">{metrics['asreproastable_cracked_count']}</span></p>
-        <p>High Value Accounts Cracked: <span class="metric">{metrics['high_value_cracked_count']}</span></p>
-        <p>Accounts with Password Not Required: <span class="metric">{metrics['passwordnotreqd_count']}</span></p>
-        <p>Accounts with Password Never Expires: <span class="metric">{metrics['pwdneverexpires_count']}</span></p>
-        <p>Accounts with LM Hashes: <span class="metric">{metrics['lm_hashes_count']}</span></p>
-        <p>Accounts Sharing Passwords: <span class="metric">{metrics['shared_passwords_count']}</span></p>
-        <p>Accounts with Policy Violations: <span class="metric">{metrics['policy_violations_count']}</span></p>
-    </div>
-
-    <div class="card">
-        <h2>Password Length Distribution</h2>
-        <div class="bar-chart">
-            {bars_html}
-        </div>
-    </div>
-    """
-    write_page("index.html", "Summary", index_content)
-
-    enabled_filter = "AND u.enabled = 1" if metrics.get('enabled_only_flag') else ""
-    pwd_col = "h.redacted_password" if redact else "h.cracked_password"
-
-    # --- Password Lengths Page ---
-    c.execute(f"""
-        SELECT length(cracked_password) as pw_len, cracked_password
-        FROM hashes h JOIN users u ON h.user_id = u.id
-        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}
-        GROUP BY cracked_password
-        ORDER BY pw_len ASC
-        LIMIT 100
-    """)
-    shortest = c.fetchall()
-
-    c.execute(f"""
-        SELECT length(cracked_password) as pw_len, cracked_password
-        FROM hashes h JOIN users u ON h.user_id = u.id
-        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL {enabled_filter}
-        GROUP BY cracked_password
-        ORDER BY pw_len DESC
-        LIMIT 100
-    """)
-    longest = c.fetchall()
-
-    def generate_length_table(title, table_id, select_id, data):
-        html_str = f'<div class="card"><h2>{title}</h2>'
-        html_str += f'<label for="{select_id}">Show rows: </label>'
-        html_str += f'<select id="{select_id}" onchange="toggleRows(\'{table_id}\', \'{select_id}\')">'
-        html_str += '<option value="10" selected>10</option>'
-        html_str += '<option value="25">25</option>'
-        html_str += '<option value="50">50</option>'
-        html_str += '<option value="100">100</option>'
-        html_str += '</select>'
-        html_str += f'<table id="{table_id}">'
-        html_str += '<tr><th>Length</th><th>Password</th></tr>'
-        for i, row in enumerate(data):
-            display_style = '' if i < 10 else 'style="display:none;"'
-            pw_val = ('*' * len(row[1]) if len(row[1]) <= 2 else row[1][0] + '*' * (len(row[1])-2) + row[1][-1]) if redact else row[1]
-            html_str += f'<tr class="data-row" {display_style}><td>{row[0]}</td><td>{html.escape(pw_val)}</td></tr>'
-        html_str += '</table></div>'
-        return html_str
-
-    lengths_content = generate_length_table("Top 100 Shortest Passwords", "shortTable", "shortSelect", shortest)
-    lengths_content += generate_length_table("Top 100 Longest Passwords", "longTable", "longSelect", longest)
-    write_page("lengths.html", "Password Lengths", lengths_content)
-
-    # --- Shared Passwords Page ---
-    q_shared_count = f"""
-        SELECT COUNT(*) FROM (
-            SELECT lower(h.nt_hash) FROM hashes h JOIN users u ON h.user_id = u.id
-            WHERE h.is_history = 0 {enabled_filter}
-            GROUP BY lower(h.nt_hash) HAVING COUNT(h.id) > 1
-        )
-    """
-    c.execute(q_shared_count)
-    total_shared_hashes = c.fetchone()[0]
-    total_shared_pages = math.ceil(total_shared_hashes / 1000)
-
-    if total_shared_pages == 0:
-        content = f'<div class="card"><h2>Shared Passwords</h2><p>No data available.</p></div>'
-        write_page("shared_1.html", "Shared Passwords", content)
-    else:
-        for page in range(1, total_shared_pages + 1):
-            offset = (page - 1) * 1000
-            # Get the distinct shared hashes
-            c.execute(f"""
-                SELECT lower(h.nt_hash), {pwd_col}, COUNT(h.id) as count
-                FROM hashes h JOIN users u ON h.user_id = u.id
-                WHERE h.is_history = 0 {enabled_filter}
-                GROUP BY lower(h.nt_hash) HAVING COUNT(h.id) > 1
-                ORDER BY count DESC
-                LIMIT 1000 OFFSET {offset}
-            """)
-            shared_page = c.fetchall()
-
-            shared_rows_html = ""
-            for i, row in enumerate(shared_page):
-                nt_hash = row[0]
-                pwd_display = html.escape(row[1] if row[1] else "")
-                hash_display = ('*' * 32 if redact else nt_hash)
-                count = row[2]
-
-                # Fetch users for this hash
-                c.execute(f"""
-                    SELECT u.domain, u.username
-                    FROM hashes h JOIN users u ON h.user_id = u.id
-                    WHERE lower(h.nt_hash) = ? AND h.is_history = 0 {enabled_filter}
-                    ORDER BY u.domain, u.username
-                """, (nt_hash,))
-                users_for_hash = c.fetchall()
-
-                row_id = f"hash_row_{page}_{i}"
-                shared_rows_html += f"""
-                    <tr>
-                        <td>{hash_display}</td>
-                        <td>{pwd_display}</td>
-                        <td>{count}</td>
-                        <td><a href="javascript:void(0);" onclick="toggleAccounts('{row_id}')">View Accounts</a></td>
-                    </tr>
-                    <tr id="{row_id}" class="ignore-filter" style="display:none; background-color: #f9f9f9;">
-                        <td colspan="4">
-                            <ul>
-                                {"".join(f"<li>{html.escape(u[0])}\\\\{html.escape(u[1])}</li>" for u in users_for_hash)}
-                            </ul>
-                        </td>
-                    </tr>
-                """
-
-            table_html = f"""
-            <div class="card">
-                <h2>Shared Passwords</h2>
-                <input type="text" id="sharedFilter" onkeyup="filterTable('sharedFilter', 'sharedTable')" placeholder="Filter by Hash, Password or Count...">
-                <table id="sharedTable">
-                    <tr><th>NT Hash</th><th>Password</th><th>Count</th><th>Action</th></tr>
-                    {shared_rows_html}
-                </table>
-            </div>
-            """
-
-            pagination = generate_pagination_html("shared", page, total_shared_pages)
-            final_content = pagination + table_html + pagination
-
-            write_page(f"shared_{page}.html", "Shared Passwords", final_content)
-
-    # --- LM Hashes Page ---
-    q_lm_count = f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND lower(h.lm_hash) != 'aad3b435b51404eeaad3b435b51404ee' {enabled_filter}"
-    hash_col = "substr('********************************', 1, length(h.lm_hash))" if redact else "h.lm_hash"
-    q_lm = f"SELECT u.domain, u.username, {hash_col} FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND lower(h.lm_hash) != 'aad3b435b51404eeaad3b435b51404ee' {enabled_filter} ORDER BY u.domain, u.username"
-    generate_paginated_pages("lm_hashes", "Accounts with LM Hashes", ["Domain", "Username", "LM Hash"], q_lm, q_lm_count)
-
-    # --- Policy Violations Page ---
-    q_pv_count = f"SELECT COUNT(*) FROM policy_violations pv JOIN users u ON pv.user_id = u.id WHERE 1=1 {enabled_filter}"
-    q_pv = f"""
-        SELECT u.domain, u.username, {pwd_col}, pv.reason
-        FROM policy_violations pv
-        JOIN users u ON pv.user_id = u.id
-        JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
-        WHERE 1=1 {enabled_filter}
-        ORDER BY u.domain, u.username
-    """
-    generate_paginated_pages("policy", "Policy Violations", ["Domain", "Username", "Password", "Reason"], q_pv, q_pv_count)
-
-    # --- High Value Page ---
-    hv_placeholders = ','.join('?' * len(high_value_groups))
-    hv_params = [g.lower() for g in high_value_groups]
-    q_hv_count = f"""
-        SELECT COUNT(DISTINCT u.id)
-        FROM users u
-        JOIN hashes h ON u.id = h.user_id
-        JOIN user_groups ug ON u.id = ug.user_id
-        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
-        AND lower(ug.group_name) IN ({hv_placeholders}) {enabled_filter}
-    """
-    q_hv = f"""
-        SELECT DISTINCT u.domain, u.username, {pwd_col}
-        FROM users u
-        JOIN hashes h ON u.id = h.user_id
-        JOIN user_groups ug ON u.id = ug.user_id
-        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
-        AND lower(ug.group_name) IN ({hv_placeholders}) {enabled_filter}
-        ORDER BY u.domain, u.username
-    """
-    generate_paginated_pages("high_value", "High Value Accounts", ["Domain", "Username", "Password"], q_hv, q_hv_count, tuple(hv_params))
-
-    # --- Kerberoastable Page ---
-    q_kerb_count = f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.kerberoastable = 1 {enabled_filter}"
-    q_kerb = f"SELECT u.domain, u.username, {pwd_col} FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.kerberoastable = 1 {enabled_filter} ORDER BY u.domain, u.username"
-    generate_paginated_pages("kerberoastable", "Kerberoastable & Cracked", ["Domain", "Username", "Password"], q_kerb, q_kerb_count)
-
-    # --- ASREPRoastable Page ---
-    q_asrep_count = f"SELECT COUNT(*) FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.asreproastable = 1 {enabled_filter}"
-    q_asrep = f"SELECT u.domain, u.username, {pwd_col} FROM hashes h JOIN users u ON h.user_id = u.id WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL AND u.asreproastable = 1 {enabled_filter} ORDER BY u.domain, u.username"
-    generate_paginated_pages("asreproastable", "ASREPRoastable & Cracked", ["Domain", "Username", "Password"], q_asrep, q_asrep_count)
-
-    # --- Flags Page ---
-    q_flags_count = f"SELECT COUNT(*) FROM users u WHERE (u.pwdneverexpires = 1 OR u.passwordnotreqd = 1) {enabled_filter}"
-    q_flags = f"""
-        SELECT u.domain, u.username,
-               CASE WHEN u.pwdneverexpires = 1 THEN 'Yes' ELSE 'No' END,
-               CASE WHEN u.passwordnotreqd = 1 THEN 'Yes' ELSE 'No' END
-        FROM users u
-        WHERE (u.pwdneverexpires = 1 OR u.passwordnotreqd = 1) {enabled_filter}
-        ORDER BY u.domain, u.username
-    """
-    generate_paginated_pages("flags", "Account Flags", ["Domain", "Username", "Password Never Expires", "Password Not Required"], q_flags, q_flags_count)
-
-    # --- History Page ---
-    # We find max history dynamically by querying the database for max history hashes for a user
-    c.execute(f"SELECT MAX(hist_count) FROM (SELECT user_id, COUNT(*) as hist_count FROM hashes JOIN users u ON user_id = u.id WHERE is_history = 1 {enabled_filter} GROUP BY user_id)")
-    row = c.fetchone()
-    max_history = row[0] if row and row[0] else 0
-
-    history_headers = ["Domain", "Username", "Current"]
-    for i in range(1, max_history + 1):
-        history_headers.append(f"History {i}")
-
-    # Generate custom query for history
-    q_hist_count = f"SELECT COUNT(DISTINCT u.id) FROM users u WHERE 1=1 {enabled_filter}"
-    c.execute(q_hist_count)
-    total_users = c.fetchone()[0]
-    total_pages = math.ceil(total_users / 1000)
-
-    if total_pages == 0:
-        content = f'<div class="card"><h2>Password History</h2><p>No data available.</p></div>'
-        write_page("history_1.html", "Password History", content)
-    else:
-        for page in range(1, total_pages + 1):
-            offset = (page - 1) * 1000
-
-            c.execute(f"SELECT id, domain, username FROM users u WHERE 1=1 {enabled_filter} ORDER BY domain, username LIMIT 1000 OFFSET {offset}")
-            users_page = c.fetchall()
-
-            user_ids = [u[0] for u in users_page]
-            if not user_ids:
-                continue
-
-            placeholders = ','.join('?' * len(user_ids))
-            # Get current hashes
-            c.execute(f"SELECT user_id, {pwd_col} FROM hashes h WHERE is_history = 0 AND user_id IN ({placeholders})", user_ids)
-            current_hashes = {r[0]: r[1] for r in c.fetchall()}
-
-            # Get history hashes
-            c.execute(f"SELECT user_id, {pwd_col} FROM hashes h WHERE is_history = 1 AND user_id IN ({placeholders}) ORDER BY user_id, id", user_ids)
-            hist_hashes = {}
-            for r in c.fetchall():
-                uid = r[0]
-                if uid not in hist_hashes:
-                    hist_hashes[uid] = []
-                hist_hashes[uid].append(r[1])
-
-            history_rows_html = ""
-            for uid, domain, username in users_page:
-                e_dom = html.escape(domain)
-                e_usr = html.escape(username)
-
-                curr = current_hashes.get(uid, "")
-                curr_display = html.escape(curr if curr else "")
-
-                row_html = f"<tr><td>{e_dom}</td><td>{e_usr}</td><td>{curr_display}</td>"
-
-                h_list = hist_hashes.get(uid, [])
-                for i in range(max_history):
-                    if i < len(h_list):
-                        h_val = h_list[i]
-                        h_display = html.escape(h_val if h_val else "")
-                        row_html += f"<td>{h_display}</td>"
-                    else:
-                        row_html += "<td></td>"
-
-                row_html += "</tr>"
-                history_rows_html += row_html
-
-            table_html = f"""
-            <div class="card">
-                <h2>User Password History</h2>
-                <input type="text" id="histFilter" onkeyup="filterTable('histFilter', 'histTable')" placeholder="Filter by Domain or Username...">
-                <table id="histTable">
-                    <tr>{"".join(f"<th>{h}</th>" for h in history_headers)}</tr>
-                    {history_rows_html}
-                </table>
-            </div>
-            """
-
-            pagination = generate_pagination_html("history", page, total_pages)
-            final_content = pagination + table_html + pagination
-
-            write_page(f"history_{page}.html", "Password History", final_content)
-
-    conn.close()
-    logging.info(f"Reports generated successfully in directory: {output_dir}/")
 
 
 def main():
@@ -1081,15 +525,20 @@ def main():
     high_value_groups = parse_high_value(args.high_value)
     policy = parse_policy(args.policy)
 
-    metrics = calculate_metrics(db_path, high_value_groups, policy, args.redact, args.enabled_only)
-    logging.info("Metrics calculated.")
+    import json
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", ("high_value_groups", json.dumps(high_value_groups)))
+    conn.commit()
+    conn.close()
 
-    generate_html_report(db_path, metrics, high_value_groups, args.redact, args.outdir)
+    calculate_metrics(db_path, policy, args.redact, args.enabled_only)
+    logging.info("Policy violations and metrics calculated.")
 
-    if os.path.exists(db_path):
-        os.remove(db_path)
+    # HTML report generation removed in favor of dynamic portal.
+    # Database is persisted.
 
-    logging.info("Analysis complete.")
+    logging.info("Analysis complete. Database ready for dynamic portal.")
 
 if __name__ == '__main__':
     main()

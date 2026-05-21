@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Shared Passwords{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Accounts with Shared Passwords</h2>
+    <table>
+        <tr>
+            <th>NT Hash</th>
+            <th>Cracked Password</th>
+            <th>Reuse Count</th>
+            <th>Shared By</th>
+        </tr>
+        {% for row in shared %}
+        <tr>
+            <td>{{ row.nt_hash }}</td>
+            <td>{{ row.cracked_password or 'Unknown' }}</td>
+            <td>{{ row.count }}</td>
+            <td>
+                <details>
+                    <summary>View Accounts</summary>
+                    {{ row.shared_by }}
+                </details>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    <div class="pagination">
+        {% if page > 1 %}
+        <a href="?page={{ page - 1 }}">Previous</a>
+        {% endif %}
+        <span>Page {{ page }}</span>
+        {% if shared|length == 1000 %}
+        <a href="?page={{ page + 1 }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

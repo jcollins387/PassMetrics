@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}Password Lengths{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Password Length Distribution</h2>
+    <table>
+        <tr>
+            <th>Length</th>
+            <th>Count</th>
+        </tr>
+        {% for row in lengths %}
+        <tr>
+            <td>{{ row.pw_length }}</td>
+            <td>{{ row.count }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endblock %}
