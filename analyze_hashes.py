@@ -241,7 +241,36 @@ def parse_ntds(ntds_path: str, db_path: str):
     conn.commit()
     conn.close()
 
-def _process_bh_file(bh_file: str):
+def _build_identifier_map(bh_files: List[str]) -> Dict[str, str]:
+    identifier_map = {}
+    for bh_file in bh_files:
+        with open(bh_file, 'r', encoding='utf-8') as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                continue
+
+            data_list = []
+            if 'data' in data:
+                data_list = data['data']
+            elif 'users' in data:
+                data_list = data['users']
+            elif 'groups' in data:
+                data_list = data['groups']
+            else:
+                if isinstance(data, list):
+                    data_list = data
+
+            for item in data_list:
+                props = item.get('Properties', {})
+                obj_id = item.get('ObjectIdentifier')
+                name = props.get('name')
+                if obj_id and name:
+                    identifier_map[obj_id] = name
+    return identifier_map
+
+def _process_bh_file(args):
+    bh_file, global_identifier_map = args
     user_updates = []
     group_inserts = []
 
@@ -252,10 +281,24 @@ def _process_bh_file(bh_file: str):
             logging.error(f"Failed to parse Bloodhound file {bh_file}")
             return user_updates, group_inserts
 
-        if 'data' not in data:
-            return user_updates, group_inserts
+        data_list = []
+        if 'data' in data:
+            data_list = data['data']
+        elif 'users' in data:
+            data_list = data['users']
+            for item in data_list:
+                item['type'] = 'User'
+        elif 'groups' in data:
+            data_list = data['groups']
+            for item in data_list:
+                item['type'] = 'Group'
+        else:
+            if isinstance(data, list):
+                data_list = data
+            else:
+                return user_updates, group_inserts
 
-        for item in data['data']:
+        for item in data_list:
             item_type = item.get('type', item.get('Type', '')).upper()
             props = item.get('Properties', {})
 
@@ -280,6 +323,8 @@ def _process_bh_file(bh_file: str):
                         m_type = member.get('ObjectType', member.get('type', '')).upper()
                         if m_type == 'USER':
                             m_name = member.get('ObjectName', member.get('name', ''))
+                            if not m_name and member.get('ObjectIdentifier'):
+                                m_name = global_identifier_map.get(member.get('ObjectIdentifier'), '')
                             if m_name:
                                 m_parts = m_name.split('@')
                                 m_user = m_parts[0].lower()
@@ -298,8 +343,13 @@ def parse_bloodhound(bh_files: List[str], db_path: str):
     all_user_updates = []
     all_group_inserts = []
 
+    # Pass 1: Build a global identifier map
+    global_identifier_map = _build_identifier_map(bh_files)
+
+    # Pass 2: Extract data
+    args_list = [(f, global_identifier_map) for f in bh_files]
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        for updates, inserts in executor.map(_process_bh_file, bh_files):
+        for updates, inserts in executor.map(_process_bh_file, args_list):
             all_user_updates.extend(updates)
             all_group_inserts.extend(inserts)
 
