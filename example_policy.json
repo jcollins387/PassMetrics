@@ -1,0 +1,20 @@
+{
+  "base": {
+    "length": 8,
+    "complexity": true
+  },
+  "fgpp": {
+    "Domain Admins": {
+      "length": 14,
+      "complexity": true
+    },
+    "Enterprise Admins": {
+      "length": 14,
+      "complexity": true
+    },
+    "ServiceAccounts": {
+      "length": 20,
+      "complexity": false
+    }
+  }
+}

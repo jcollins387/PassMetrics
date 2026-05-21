@@ -1,0 +1,14 @@
+Domain Admins
+Enterprise Admins
+Schema Admins
+Account Operators
+Backup Operators
+Print Operators
+Server Operators
+Domain Controllers
+Read-only Domain Controllers
+Group Policy Creator Owners
+Cryptographic Operators
+Distributed COM Users
+Remote Desktop Users
+WinRMRemoteWMIUsers__
