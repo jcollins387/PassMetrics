@@ -281,9 +281,9 @@ def calculate_metrics(users: Dict[str, UserData], high_value_groups: List[str], 
         # We process based on the current hash
 
         # Kerberoastable/ASREPRoastable
-        if user.kerberoastable and current_hash.cracked_password:
+        if user.kerberoastable and current_hash.cracked_password and user.enabled:
             metrics['kerberoastable_cracked'].append(user)
-        if user.asreproastable and current_hash.cracked_password:
+        if user.asreproastable and current_hash.cracked_password and user.enabled:
             metrics['asreproastable_cracked'].append(user)
 
         # High value targets
