@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Overview Metrics</h2>
+    <ul>
+        <li>Total Accounts: <span class="metric">{{ total_accounts }}</span></li>
+        <li>Total Passwords (Non-History): <span class="metric">{{ total_passwords }}</span></li>
+        <li>Total Cracked: <span class="metric">{{ total_cracked }}</span></li>
+    </ul>
+</div>
+{% endblock %}

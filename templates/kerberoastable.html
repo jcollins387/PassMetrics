@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}Kerberoastable{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Kerberoastable Accounts</h2>
+    <table>
+        <tr>
+            <th>Domain</th>
+            <th>Username</th>
+            <th>Cracked Password</th>
+        </tr>
+        {% for row in users %}
+        <tr>
+            <td>{{ row.domain }}</td>
+            <td>{{ row.username }}</td>
+            <td>{{ row.cracked_password or 'Unknown' }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <div class="pagination">
+        {% if page > 1 %}
+        <a href="?page={{ page - 1 }}">Previous</a>
+        {% endif %}
+        <span>Page {{ page }}</span>
+        {% if users|length == 1000 %}
+        <a href="?page={{ page + 1 }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

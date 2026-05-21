@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}LM Hashes{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Accounts with LM Hashes</h2>
+    <table>
+        <tr>
+            <th>Domain</th>
+            <th>Username</th>
+            <th>LM Hash</th>
+        </tr>
+        {% for row in users %}
+        <tr>
+            <td>{{ row.domain }}</td>
+            <td>{{ row.username }}</td>
+            <td>{{ row.lm_hash }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <div class="pagination">
+        {% if page > 1 %}
+        <a href="?page={{ page - 1 }}">Previous</a>
+        {% endif %}
+        <span>Page {{ page }}</span>
+        {% if users|length == 1000 %}
+        <a href="?page={{ page + 1 }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
