@@ -8,12 +8,7 @@ This project is a Python-based Active Directory password auditor that parses NTD
 To pull the hashes from a domain controller, you can use the built-in `ntdsutil` tool. Run the following commands from an elevated command prompt on the domain controller:
 
 ```cmd
-ntdsutil
-activate instance ntds
-ifm
-create full C:\temp\ntds_export
-quit
-quit
+ntdsutil activate instance ntds ifm create full C:\temp\ntds_export quit quit
 ```
 
 This will export the Active Directory database (ntds.dit) and the SYSTEM registry hive to `C:\temp\ntds_export`.
@@ -22,7 +17,7 @@ This will export the Active Directory database (ntds.dit) and the SYSTEM registr
 Once you have the `ntds.dit` and `SYSTEM` hive, you need to extract the hashes. You can use `secretsdump.py` from Impacket to do this. Be sure to include the `-history` flag to extract password history, which this tool supports analyzing.
 
 ```bash
-secretsdump.py -ntds "C:\temp\ntds_export\Active Directory\ntds.dit" -system C:\temp\ntds_export\registry\SYSTEM LOCAL -history -outputfile extracted_hashes
+secretsdump.py -ntds ntds.dit -system SYSTEM LOCAL -history -outputfile extracted_hashes
 ```
 This will produce a file named `extracted_hashes.ntds` containing the user hashes.
 
