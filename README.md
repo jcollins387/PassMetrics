@@ -22,7 +22,7 @@ This will export the Active Directory database (ntds.dit) and the SYSTEM registr
 Once you have the `ntds.dit` and `SYSTEM` hive, you need to extract the hashes. You can use `secretsdump.py` from Impacket to do this. Be sure to include the `-history` flag to extract password history, which this tool supports analyzing.
 
 ```bash
-secretsdump.py -ntds C:\temp\ntds_export\Active Directory\ntds.dit -system C:\temp\ntds_export\registry\SYSTEM LOCAL -history -outputfile extracted_hashes
+secretsdump.py -ntds "C:\temp\ntds_export\Active Directory\ntds.dit" -system C:\temp\ntds_export\registry\SYSTEM LOCAL -history -outputfile extracted_hashes
 ```
 This will produce a file named `extracted_hashes.ntds` containing the user hashes.
 

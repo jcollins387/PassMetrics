@@ -10,24 +10,40 @@
             <th>Domain</th>
             <th>Username</th>
             <th>Current Password</th>
-            <th>Historical Passwords</th>
+            {% for i in range(1, max_history + 1) %}
+            <th>HISTORY{{ i }}</th>
+            {% endfor %}
         </tr>
         {% for row in history %}
         <tr>
             <td>{{ row.domain }}</td>
             <td>{{ row.username }}</td>
-            <td>{{ row.current_password or 'Unknown' }}</td>
-            <td>{{ row.history_passwords }}</td>
+            <td>{{ row.current }}</td>
+            {% for i in range(max_history) %}
+            <td>
+                {% if i < row.history|length %}
+                    {{ row.history[i] }}
+                {% endif %}
+            </td>
+            {% endfor %}
         </tr>
         {% endfor %}
     </table>
     <div class="pagination">
         {% if page > 1 %}
-        <a href="?page={{ page - 1 }}">Previous</a>
+        <a href="?page={{ page - 1 }}&per_page={{ per_page }}">Previous</a>
         {% endif %}
         <span>Page {{ page }}</span>
-        {% if history|length == 1000 %}
-        <a href="?page={{ page + 1 }}">Next</a>
+
+        <select onchange="window.location.href='?page=1&per_page='+this.value">
+            <option value="50" {% if per_page == 50 %}selected{% endif %}>50 per page</option>
+            <option value="100" {% if per_page == 100 %}selected{% endif %}>100 per page</option>
+            <option value="250" {% if per_page == 250 %}selected{% endif %}>250 per page</option>
+            <option value="500" {% if per_page == 500 %}selected{% endif %}>500 per page</option>
+        </select>
+
+        {% if history|length == per_page %}
+        <a href="?page={{ page + 1 }}&per_page={{ per_page }}">Next</a>
         {% endif %}
     </div>
 </div>

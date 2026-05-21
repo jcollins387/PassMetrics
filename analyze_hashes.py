@@ -128,6 +128,11 @@ def parse_potfile(potfile_path: str, db_path: str):
                 # NTHashes in potfile are usually 32 chars long. We index by lowercase to avoid case issues
                 h, p = parts
                 if len(h) == 32:
+                    if p.startswith('$HEX[') and p.endswith(']'):
+                        try:
+                            p = bytes.fromhex(p[5:-1]).decode('utf-8', errors='replace')
+                        except ValueError:
+                            pass
                     batch.append((h.lower(), p))
 
             if len(batch) >= 100000:

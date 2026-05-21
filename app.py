@@ -53,16 +53,19 @@ def lengths():
         FROM hashes
         WHERE is_history = 0 AND cracked_password IS NOT NULL
         GROUP BY length(cracked_password)
-        ORDER BY count DESC
+        ORDER BY pw_length DESC
     """)
     lengths_data = c.fetchall()
 
-    return render_template('lengths.html', lengths=lengths_data)
+    max_count = max([row["count"] for row in lengths_data]) if lengths_data else 1
+
+
+    return render_template('lengths.html', lengths=lengths_data, max_count=max_count)
 
 @app.route('/shared')
 def shared():
     page = request.args.get('page', 1, type=int)
-    per_page = 1000
+    per_page = request.args.get('per_page', 50, type=int)
     offset = (page - 1) * per_page
 
     db = get_db()
@@ -81,12 +84,12 @@ def shared():
     """, (per_page, offset))
     shared_data = c.fetchall()
 
-    return render_template('shared.html', shared=shared_data, page=page)
+    return render_template('shared.html', shared=shared_data, page=page, per_page=per_page)
 
 @app.route('/lm_hashes')
 def lm_hashes():
     page = request.args.get('page', 1, type=int)
-    per_page = 1000
+    per_page = request.args.get('per_page', 50, type=int)
     offset = (page - 1) * per_page
 
     db = get_db()
@@ -102,12 +105,12 @@ def lm_hashes():
     """, (per_page, offset))
     lm_data = c.fetchall()
 
-    return render_template('lm_hashes.html', users=lm_data, page=page)
+    return render_template('lm_hashes.html', users=lm_data, page=page, per_page=per_page)
 
 @app.route('/policy')
 def policy():
     page = request.args.get('page', 1, type=int)
-    per_page = 1000
+    per_page = request.args.get('per_page', 50, type=int)
     offset = (page - 1) * per_page
 
     db = get_db()
@@ -122,13 +125,14 @@ def policy():
     """, (per_page, offset))
     policy_data = c.fetchall()
 
-    return render_template('policy.html', violations=policy_data, page=page)
+    return render_template('policy.html', violations=policy_data, page=page, per_page=per_page)
 
 @app.route('/high_value')
 def high_value():
     import json
     page = request.args.get('page', 1, type=int)
-    per_page = 1000
+    per_page = request.args.get('per_page', 50, type=int)
+    group_filter = request.args.get('group', 'default')
     offset = (page - 1) * per_page
 
     db = get_db()
@@ -140,8 +144,18 @@ def high_value():
 
     hv_data = []
     if high_value_groups:
-        placeholders = ','.join('?' * len(high_value_groups))
-        params = [g.lower() for g in high_value_groups] + [per_page, offset]
+        if group_filter == 'all':
+            target_groups = high_value_groups
+        elif group_filter != 'default':
+            target_groups = [group_filter]
+        else:
+            # Default is Domain Admins and Enterprise Admins if they exist
+            target_groups = [g for g in high_value_groups if g.lower() in ('domain admins', 'enterprise admins')]
+            if not target_groups:
+                target_groups = high_value_groups # fallback to all if defaults aren't there
+
+        placeholders = ','.join('?' * len(target_groups))
+        params = [g.lower() for g in target_groups] + [per_page, offset]
 
         c.execute(f"""
             SELECT DISTINCT u.domain, u.username, ug.group_name, h.cracked_password
@@ -155,12 +169,12 @@ def high_value():
         """, params)
         hv_data = c.fetchall()
 
-    return render_template('high_value.html', users=hv_data, page=page)
+    return render_template('high_value.html', users=hv_data, page=page, per_page=per_page, groups=high_value_groups, selected_group=group_filter)
 
 @app.route('/kerberoastable')
 def kerberoastable():
     page = request.args.get('page', 1, type=int)
-    per_page = 1000
+    per_page = request.args.get('per_page', 50, type=int)
     offset = (page - 1) * per_page
 
     db = get_db()
@@ -176,12 +190,12 @@ def kerberoastable():
     """, (per_page, offset))
     krb_data = c.fetchall()
 
-    return render_template('kerberoastable.html', users=krb_data, page=page)
+    return render_template('kerberoastable.html', users=krb_data, page=page, per_page=per_page)
 
 @app.route('/asreproastable')
 def asreproastable():
     page = request.args.get('page', 1, type=int)
-    per_page = 1000
+    per_page = request.args.get('per_page', 50, type=int)
     offset = (page - 1) * per_page
 
     db = get_db()
@@ -197,12 +211,12 @@ def asreproastable():
     """, (per_page, offset))
     asrep_data = c.fetchall()
 
-    return render_template('asreproastable.html', users=asrep_data, page=page)
+    return render_template('asreproastable.html', users=asrep_data, page=page, per_page=per_page)
 
 @app.route('/flags')
 def flags():
     page = request.args.get('page', 1, type=int)
-    per_page = 1000
+    per_page = request.args.get('per_page', 50, type=int)
     offset = (page - 1) * per_page
 
     db = get_db()
@@ -217,33 +231,56 @@ def flags():
     """, (per_page, offset))
     flags_data = c.fetchall()
 
-    return render_template('flags.html', users=flags_data, page=page)
+    return render_template('flags.html', users=flags_data, page=page, per_page=per_page)
 
 @app.route('/history')
 def history():
     page = request.args.get('page', 1, type=int)
-    per_page = 1000
+    per_page = request.args.get('per_page', 50, type=int)
     offset = (page - 1) * per_page
 
     db = get_db()
     c = db.cursor()
 
-    # In SQLite, gathering dynamic history columns per user is complex in a single query.
-    # Group concat history hashes for the portal view.
+    # Get users with history
     c.execute("""
-        SELECT u.domain, u.username,
-               MAX(CASE WHEN h.is_history = 0 THEN h.cracked_password ELSE NULL END) as current_password,
-               GROUP_CONCAT(CASE WHEN h.is_history = 1 THEN h.cracked_password ELSE NULL END, ', ') as history_passwords
+        SELECT u.id, u.domain, u.username
         FROM users u
-        JOIN hashes h ON u.id = h.user_id
-        GROUP BY u.id
-        HAVING history_passwords IS NOT NULL
+        WHERE EXISTS (SELECT 1 FROM hashes h WHERE h.user_id = u.id AND h.is_history = 1)
         ORDER BY u.domain, u.username
         LIMIT ? OFFSET ?
     """, (per_page, offset))
-    history_data = c.fetchall()
+    users = c.fetchall()
 
-    return render_template('history.html', history=history_data, page=page)
+    history_data = []
+    max_history = 0
+
+    if users:
+        user_ids = [str(u['id']) for u in users]
+        placeholders = ','.join(user_ids)
+        c.execute(f"""
+            SELECT user_id, is_history, cracked_password, id as hash_id
+            FROM hashes
+            WHERE user_id IN ({placeholders})
+            ORDER BY user_id, hash_id ASC
+        """)
+        hashes = c.fetchall()
+
+        user_dict = {u['id']: {'domain': u['domain'], 'username': u['username'], 'current': '', 'history': []} for u in users}
+
+        for h in hashes:
+            uid = h['user_id']
+            cp = h['cracked_password'] if h['cracked_password'] is not None else ''
+            if h['is_history'] == 0:
+                user_dict[uid]['current'] = cp
+            else:
+                user_dict[uid]['history'].append(cp)
+
+        for uid, data in user_dict.items():
+            max_history = max(max_history, len(data['history']))
+            history_data.append(data)
+
+    return render_template('history.html', history=history_data, max_history=max_history, page=page, per_page=per_page)
 
 
 if __name__ == '__main__':

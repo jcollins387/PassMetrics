@@ -5,6 +5,16 @@
 {% block content %}
 <div class="card">
     <h2>Cracked High Value Targets</h2>
+    <div style="margin-bottom: 15px;">
+        <label for="groupSelect">Filter by Group:</label>
+        <select id="groupSelect" onchange="window.location.href='?group=' + this.value + '&per_page={{ per_page }}'">
+            <option value="default" {% if selected_group == 'default' %}selected{% endif %}>Default (Domain/Enterprise Admins)</option>
+            <option value="all" {% if selected_group == 'all' %}selected{% endif %}>All High Value Groups</option>
+            {% for g in groups %}
+            <option value="{{ g }}" {% if selected_group == g %}selected{% endif %}>{{ g }}</option>
+            {% endfor %}
+        </select>
+    </div>
     <table>
         <tr>
             <th>Domain</th>
@@ -23,11 +33,19 @@
     </table>
     <div class="pagination">
         {% if page > 1 %}
-        <a href="?page={{ page - 1 }}">Previous</a>
+        <a href="?page={{ page - 1 }}&per_page={{ per_page }}&group={{ selected_group }}">Previous</a>
         {% endif %}
         <span>Page {{ page }}</span>
-        {% if users|length == 1000 %}
-        <a href="?page={{ page + 1 }}">Next</a>
+
+        <select onchange="window.location.href='?page=1&per_page='+this.value+'&group={{ selected_group }}'">
+            <option value="50" {% if per_page == 50 %}selected{% endif %}>50 per page</option>
+            <option value="100" {% if per_page == 100 %}selected{% endif %}>100 per page</option>
+            <option value="250" {% if per_page == 250 %}selected{% endif %}>250 per page</option>
+            <option value="500" {% if per_page == 500 %}selected{% endif %}>500 per page</option>
+        </select>
+
+        {% if users|length == per_page %}
+        <a href="?page={{ page + 1 }}&per_page={{ per_page }}&group={{ selected_group }}">Next</a>
         {% endif %}
     </div>
 </div>
