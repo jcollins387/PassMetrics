@@ -1,3 +1,7 @@
+# This file defines high-value groups to track in the report.
+# Provide one group name per line.
+# Note: Matching is EXACT and case-insensitive. It is not a fuzzy match.
+# For example, specifying "Admin" will NOT match "Domain Admins".
 Domain Admins
 Enterprise Admins
 Schema Admins

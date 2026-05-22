@@ -1,4 +1,5 @@
 {
+  "_comment": "Fine-Grained Password Policies (fgpp) override the base policy. Matching is an exact case-insensitive match for Group Names, or a substring match for Distinguished Names (OUs). The first matching policy found in the dictionary will be applied to the user.",
   "base": {
     "length": 8,
     "complexity": true,
