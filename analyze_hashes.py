@@ -5,6 +5,7 @@ import logging
 import html
 import sqlite3
 import math
+import time
 import concurrent.futures
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set
@@ -53,7 +54,9 @@ def init_db(db_path: str):
             pwdneverexpires BOOLEAN DEFAULT 0,
             passwordnotreqd BOOLEAN DEFAULT 0,
             kerberoastable BOOLEAN DEFAULT 0,
-            asreproastable BOOLEAN DEFAULT 0
+            asreproastable BOOLEAN DEFAULT 0,
+            distinguishedname TEXT,
+            pwdlastset INTEGER
         );
         CREATE TABLE IF NOT EXISTS hashes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -313,7 +316,9 @@ def _process_bh_file(args):
                         'pwdneverexpires': props.get('pwdneverexpires', False),
                         'passwordnotreqd': props.get('passwordnotreqd', False),
                         'kerberoastable': props.get('hasspn', False),
-                        'asreproastable': props.get('dontreqpreauth', False)
+                        'asreproastable': props.get('dontreqpreauth', False),
+                        'distinguishedname': props.get('distinguishedname', ''),
+                        'pwdlastset': props.get('pwdlastset', 0)
                     })
 
             if item_type == 'GROUP' or (not item_type and 'Members' in item):
@@ -369,14 +374,16 @@ def parse_bloodhound(bh_files: List[str], db_path: str):
                 pwdneverexpires BOOLEAN,
                 passwordnotreqd BOOLEAN,
                 kerberoastable BOOLEAN,
-                asreproastable BOOLEAN
+                asreproastable BOOLEAN,
+                distinguishedname TEXT,
+                pwdlastset INTEGER
             );
             CREATE INDEX idx_bh_users ON bh_users(domain, username);
             CREATE INDEX idx_bh_users_username ON bh_users(username);
         """)
 
-        batch = [(u['domain'], u['samaccountname'], u['enabled'], u['pwdneverexpires'], u['passwordnotreqd'], u['kerberoastable'], u['asreproastable']) for u in all_user_updates]
-        c.executemany("INSERT INTO bh_users VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+        batch = [(u['domain'], u['samaccountname'], u['enabled'], u['pwdneverexpires'], u['passwordnotreqd'], u['kerberoastable'], u['asreproastable'], u['distinguishedname'], u['pwdlastset']) for u in all_user_updates]
+        c.executemany("INSERT INTO bh_users VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
 
         # Apply strict match (domain + username)
         c.execute("""
@@ -385,7 +392,9 @@ def parse_bloodhound(bh_files: List[str], db_path: str):
                 pwdneverexpires = (SELECT pwdneverexpires FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
                 passwordnotreqd = (SELECT passwordnotreqd FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
                 kerberoastable = (SELECT kerberoastable FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
-                asreproastable = (SELECT asreproastable FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username))
+                asreproastable = (SELECT asreproastable FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
+                distinguishedname = (SELECT distinguishedname FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
+                pwdlastset = (SELECT pwdlastset FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username))
             WHERE EXISTS (
                 SELECT 1 FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)
             )
@@ -399,7 +408,9 @@ def parse_bloodhound(bh_files: List[str], db_path: str):
                 pwdneverexpires = (SELECT pwdneverexpires FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
                 passwordnotreqd = (SELECT passwordnotreqd FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
                 kerberoastable = (SELECT kerberoastable FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
-                asreproastable = (SELECT asreproastable FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1)
+                asreproastable = (SELECT asreproastable FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
+                distinguishedname = (SELECT distinguishedname FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
+                pwdlastset = (SELECT pwdlastset FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1)
             WHERE NOT EXISTS (
                 SELECT 1 FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)
             ) AND EXISTS (
@@ -505,7 +516,7 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     # Policy Violations
     logging.info("Calculating policy violations...")
     c.execute(f"""
-        SELECT u.id, h.cracked_password, group_concat(lower(ug.group_name))
+        SELECT u.id, h.cracked_password, group_concat(lower(ug.group_name)), u.distinguishedname, u.pwdlastset
         FROM users u
         JOIN hashes h ON u.id = h.user_id
         LEFT JOIN user_groups ug ON u.id = ug.user_id
@@ -517,20 +528,26 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     fgpp_policies = policy.get("fgpp", {})
     base_policy = policy.get("base", {})
 
+    current_time = time.time()
+
     for row in c.fetchall():
         user_id = row[0]
         pwd = row[1]
         user_groups_lower = row[2].split(",") if row[2] else []
+        dn_lower = row[3].lower() if row[3] else ""
+        pwdlastset = row[4]
 
         applicable_policy = base_policy
         for group, g_policy in fgpp_policies.items():
-            if group.lower() in user_groups_lower:
+            group_lower = group.lower()
+            if group_lower in user_groups_lower or (dn_lower and f"{group_lower}," in f"{dn_lower},"):
                 applicable_policy = g_policy
                 break
 
         if applicable_policy:
             min_len = applicable_policy.get("length", 0)
             req_complexity = applicable_policy.get("complexity", False)
+            max_lifetime = applicable_policy.get("lifetime", 0)
 
             reasons = []
             if len(pwd) < min_len:
@@ -544,6 +561,11 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
                 if sum([has_upper, has_lower, has_digit, has_special]) < 3:
                     reasons.append("Fails complexity")
 
+            if max_lifetime > 0 and pwdlastset:
+                age_days = (current_time - pwdlastset) / 86400.0
+                if age_days > max_lifetime:
+                    reasons.append(f"Lifetime > {max_lifetime} days")
+
             if reasons:
                 violations.append((user_id, ", ".join(reasons)))
 
@@ -554,7 +576,6 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     conn.close()
 
 import os
-import time
 
 
 def main():
