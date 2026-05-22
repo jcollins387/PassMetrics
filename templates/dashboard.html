@@ -8,7 +8,85 @@
     <ul>
         <li>Total Accounts: <span class="metric">{{ total_accounts }}</span></li>
         <li>Total Passwords (Non-History): <span class="metric">{{ total_passwords }}</span></li>
-        <li>Total Cracked: <span class="metric">{{ total_cracked }}</span></li>
     </ul>
+
+    <h2>Analysis Metrics</h2>
+    <ul>
+        <li>Total Cracked: <span class="metric">{{ total_cracked }}</span> / {{ total_passwords }} ({% if total_passwords > 0 %}{{ "%.1f"|format((total_cracked / total_passwords) * 100) }}{% else %}0.0{% endif %}%)</li>
+        <li>Policy Violations: <span class="metric">{{ total_policy_violations }}</span> / {{ total_accounts }} ({% if total_accounts > 0 %}{{ "%.1f"|format((total_policy_violations / total_accounts) * 100) }}{% else %}0.0{% endif %}%)</li>
+        <li>Kerberoastable Accounts Cracked: <span class="metric">{{ cracked_kerberoastable }}</span> / {{ total_kerberoastable }} ({% if total_kerberoastable > 0 %}{{ "%.1f"|format((cracked_kerberoastable / total_kerberoastable) * 100) }}{% else %}0.0{% endif %}%)</li>
+        <li>ASREPRoastable Accounts Cracked: <span class="metric">{{ cracked_asreproastable }}</span> / {{ total_asreproastable }} ({% if total_asreproastable > 0 %}{{ "%.1f"|format((cracked_asreproastable / total_asreproastable) * 100) }}{% else %}0.0{% endif %}%)</li>
+        <li>Accounts with "Password Never Expires": <span class="metric">{{ total_pwdneverexpires }}</span> / {{ total_accounts }} ({% if total_accounts > 0 %}{{ "%.1f"|format((total_pwdneverexpires / total_accounts) * 100) }}{% else %}0.0{% endif %}%)</li>
+        <li>Accounts with "Password Not Required": <span class="metric">{{ total_passwordnotreqd }}</span> / {{ total_accounts }} ({% if total_accounts > 0 %}{{ "%.1f"|format((total_passwordnotreqd / total_accounts) * 100) }}{% else %}0.0{% endif %}%)</li>
+        <li>High Value Accounts Cracked: <span class="metric">{{ cracked_high_value }}</span> / {{ total_high_value }} ({% if total_high_value > 0 %}{{ "%.1f"|format((cracked_high_value / total_high_value) * 100) }}{% else %}0.0{% endif %}%)</li>
+    </ul>
+</div>
+
+<div class="card">
+    <h2>Top 5 Metrics</h2>
+    <div style="display: flex; flex-wrap: wrap; gap: 20px;">
+        <div style="flex: 1; min-width: 300px;">
+            <h3>Top 5 Most Common</h3>
+            <table>
+                <tr>
+                    <th>Password</th>
+                    <th>Count</th>
+                </tr>
+                {% for row in top_common %}
+                <tr>
+                    <td>{{ row.cracked_password }}</td>
+                    <td>{{ row.count }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <div style="flex: 1; min-width: 300px;">
+            <h3>Top 5 Longest (Cracked)</h3>
+            <table>
+                <tr>
+                    <th>Password</th>
+                    <th>Length</th>
+                </tr>
+                {% for row in top_longest %}
+                <tr>
+                    <td>{{ row.cracked_password }}</td>
+                    <td>{{ row.pw_length }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <div style="flex: 1; min-width: 300px;">
+            <h3>Top 5 Shortest (Cracked)</h3>
+            <table>
+                <tr>
+                    <th>Password</th>
+                    <th>Length</th>
+                </tr>
+                {% for row in top_shortest %}
+                <tr>
+                    <td>{{ row.cracked_password }}</td>
+                    <td>{{ row.pw_length }}</td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Password Length Distribution</h2>
+    <div style="width: 100%; max-width: 600px;">
+        {% for row in lengths %}
+        <div style="display: flex; align-items: center; margin-bottom: 5px;">
+            <div style="width: 50px; text-align: right; padding-right: 10px;">{{ row.pw_length }}</div>
+            <div style="flex-grow: 1; background: #eee; height: 20px; position: relative;">
+                <div style="background: #007bff; height: 100%; width: {{ (row.count / max_count * 100) }}%;"></div>
+            </div>
+            <div style="width: 50px; padding-left: 10px;">{{ row.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
 </div>
 {% endblock %}
