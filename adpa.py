@@ -101,16 +101,23 @@ def init_db(db_path: str):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Analyze NTDS hashes against a potfile and optional Bloodhound data.")
+    parser = argparse.ArgumentParser(
+        description="Analyze NTDS hashes against a potfile and optional Bloodhound data.",
+        add_help=False
+    )
 
-    parser.add_argument('--ntds', required=True, help="NTDS file containing password hashes")
-    parser.add_argument('--potfile', required=True, help="Hashcat potfile containing the cracked hashes")
-    parser.add_argument('--bloodhound', nargs='+', help="(OPTIONAL) One or more json files generated from bloodhound")
-    parser.add_argument('--policy', help="(OPTIONAL) JSON file containing password policy")
-    parser.add_argument('--high-value', help="(OPTIONAL) File containing high value groups/OUs")
-    parser.add_argument('--enabled-only', action='store_true', help="(OPTIONAL) Show only 'enabled' users (IGNORE IF NO BLOODHOUND)")
-    parser.add_argument('--redact', action='store_true', help="(OPTIONAL) Redact the passwords and hashes in reports")
-    parser.add_argument('--outdir', help="(OPTIONAL) Directory to output HTML reports to. Defaults to report_<timestamp>")
+    required = parser.add_argument_group('Required Arguments')
+    required.add_argument('-n', '--ntds', required=True, help="NTDS file containing password hashes")
+    required.add_argument('-p', '--potfile', required=True, help="Hashcat potfile containing the cracked hashes")
+
+    optional = parser.add_argument_group('Optional Arguments')
+    optional.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS, help="Show this help message and exit")
+    optional.add_argument('-b', '--bloodhound', nargs='+', help="One or more json files generated from bloodhound")
+    optional.add_argument('--policy', help="JSON file containing password policy")
+    optional.add_argument('--high-value', help="File containing high value groups/OUs")
+    optional.add_argument('--enabled-only', action='store_true', help="Show only 'enabled' users (requires BloodHound data)")
+    optional.add_argument('--redact', action='store_true', help="Redact the passwords and hashes in reports")
+    optional.add_argument('--outdir', help="Directory to output HTML reports to. Defaults to report_<timestamp>")
 
     return parser.parse_args()
 
@@ -597,6 +604,22 @@ def main():
     if args.bloodhound:
         parse_bloodhound(args.bloodhound, db_path)
         logging.info("Parsed Bloodhound data into DB.")
+
+        if args.enabled_only:
+            logging.info("Applying global --enabled-only filter. Deleting disabled users and associated data from DB.")
+            conn = sqlite3.connect(db_path)
+            c = conn.cursor()
+
+            # Delete from related tables first
+            c.execute("DELETE FROM hashes WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
+            c.execute("DELETE FROM user_groups WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
+            c.execute("DELETE FROM policy_violations WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
+
+            # Delete from users table
+            c.execute("DELETE FROM users WHERE enabled = 0")
+
+            conn.commit()
+            conn.close()
 
     high_value_groups = parse_high_value(args.high_value)
     policy = parse_policy(args.policy)
