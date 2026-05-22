@@ -50,8 +50,11 @@ python adpa.py \
 *Note: The `--redact` flag will redact the cracked passwords in the database and web reports.*
 
 **Using the Example Files:**
-- `example_policy.json`: A sample password policy definition. You can modify it to match your organization's required base password length/complexity, and define Fine-Grained Password Policies (FGPP) for specific groups (e.g., Domain Admins). Pass this file with the `--policy` flag to calculate policy violations.
+- `example_policy.json`: A sample password policy definition. You can modify it to match your organization's required base password length/complexity, and define Fine-Grained Password Policies (FGPP) for specific groups (e.g., Domain Admins) or OUs.
+  - **Matching Logic:** The script evaluates the base policy against all accounts. It then checks the `fgpp` dictionary in the JSON. If an account is a member of a group that exactly matches a key in `fgpp` (case-insensitive), or if the account's Distinguished Name (DN) contains a key from `fgpp` as a substring, that FGPP policy supersedes the base policy.
+  - **Precedence:** The script uses the *first* matching policy it finds in the `fgpp` dictionary. If a user is part of multiple groups that have defined FGPPs, the one listed first in your JSON file takes precedence.
 - `example_high_value_groups.txt`: A sample list of high value groups (one per line). Pass this file with the `--high-value` flag to track and filter cracked accounts belonging to these groups in the web report.
+  - **Matching Logic:** The script performs an exact, case-insensitive match against the group name. It is not a fuzzy match. For example, "Admin" will not match "Domain Admins". A user must be explicitly listed as a member of the exact group name provided in this file to be considered a high-value target.
 
 ### 5. Viewing the Reports
 After `adpa.py` finishes, it will generate an SQLite database named `analysis.db`.

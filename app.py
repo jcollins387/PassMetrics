@@ -1,5 +1,7 @@
 import sqlite3
-from flask import Flask, render_template, request, g
+import io
+import csv
+from flask import Flask, render_template, request, g, Response
 
 app = Flask(__name__)
 DATABASE = 'analysis.db'
@@ -155,6 +157,104 @@ def dashboard():
                            lengths=lengths_data,
                            max_count=max_count)
 
+
+
+import io
+import csv
+from flask import Response
+
+
+@app.route('/export_csv')
+def export_csv():
+    db = get_db()
+    c = db.cursor()
+
+    # Get users and their policy violations
+    c.execute('''
+        SELECT u.id, u.domain, u.username, u.passwordnotreqd, u.pwdneverexpires, u.kerberoastable, u.asreproastable, pv.reason
+        FROM users u
+        LEFT JOIN policy_violations pv ON u.id = pv.user_id
+        ORDER BY u.domain, u.username
+    ''')
+    rows = c.fetchall()
+
+    # Find all unique policy violations dynamically based on the reason string
+    violation_types = set()
+    for row in rows:
+        reason = row['reason']
+        if reason:
+            for r in reason.split(','):
+                r = r.strip()
+                if r:
+                    # e.g., "Length < 8" -> "Length", "Fails complexity" -> "Complexity", "Lifetime > 90 days" -> "Lifetime"
+                    # However, to be fully dynamic, we extract the first word or handle known cases if they vary,
+                    # but the cleanest dynamic way is to take the whole string if it's unique, or prefix it.
+                    # Given the examples: Length < x, Fails complexity, Lifetime > x days
+                    # Let's extract the core violation type:
+                    if r.lower().startswith('length'):
+                        violation_types.add('Length')
+                    elif 'complexity' in r.lower():
+                        violation_types.add('Complexity')
+                    elif r.lower().startswith('lifetime'):
+                        violation_types.add('Lifetime')
+                    else:
+                        violation_types.add(r) # fallback for fully dynamic
+
+    # Ensure consistent ordering
+    violation_types = sorted(list(violation_types))
+
+    # Base columns
+    headers = [
+        'Domain', 'Account Name', 'Password Not Required', 'Password Never Expires',
+        'Kerberoastable', 'ASREPRoastable'
+    ]
+
+    # Dynamic columns
+    for vt in violation_types:
+        headers.append(f'Policy Violation - {vt}')
+
+    si = io.StringIO()
+    cw = csv.writer(si)
+    cw.writerow(headers)
+
+    for row in rows:
+        domain = row['domain']
+        username = row['username']
+        pnr = 'x' if row['passwordnotreqd'] else ''
+        pne = 'x' if row['pwdneverexpires'] else ''
+        kerb = 'x' if row['kerberoastable'] else ''
+        asrep = 'x' if row['asreproastable'] else ''
+
+        csv_row = [domain, username, pnr, pne, kerb, asrep]
+
+        reason = row['reason'] or ''
+        reason_list = [r.strip() for r in reason.split(',')] if reason else []
+
+        for vt in violation_types:
+            found = False
+            for r in reason_list:
+                if vt == 'Length' and r.lower().startswith('length'):
+                    found = True
+                elif vt == 'Complexity' and 'complexity' in r.lower():
+                    found = True
+                elif vt == 'Lifetime' and r.lower().startswith('lifetime'):
+                    found = True
+                elif vt == r:
+                    found = True
+
+            if found:
+                csv_row.append('x')
+            else:
+                csv_row.append('')
+
+        cw.writerow(csv_row)
+
+    output = si.getvalue()
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-disposition": "attachment; filename=report.csv"}
+    )
 
 @app.route('/lengths')
 def lengths():
