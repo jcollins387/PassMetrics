@@ -37,10 +37,124 @@ def dashboard():
     c.execute("SELECT COUNT(*) FROM hashes WHERE is_history = 0 AND cracked_password IS NOT NULL")
     total_cracked = c.fetchone()[0]
 
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM policy_violations")
+    total_policy_violations = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM users WHERE kerberoastable = 1 AND enabled = 1")
+    total_kerberoastable = c.fetchone()[0]
+
+    c.execute("""
+        SELECT COUNT(*)
+        FROM users u
+        JOIN hashes h ON u.id = h.user_id
+        WHERE u.kerberoastable = 1 AND u.enabled = 1 AND h.is_history = 0 AND h.cracked_password IS NOT NULL
+    """)
+    cracked_kerberoastable = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM users WHERE asreproastable = 1 AND enabled = 1")
+    total_asreproastable = c.fetchone()[0]
+
+    c.execute("""
+        SELECT COUNT(*)
+        FROM users u
+        JOIN hashes h ON u.id = h.user_id
+        WHERE u.asreproastable = 1 AND u.enabled = 1 AND h.is_history = 0 AND h.cracked_password IS NOT NULL
+    """)
+    cracked_asreproastable = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM users WHERE pwdneverexpires = 1")
+    total_pwdneverexpires = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM users WHERE passwordnotreqd = 1")
+    total_passwordnotreqd = c.fetchone()[0]
+
+    import json
+    c.execute("SELECT value FROM config WHERE key = 'high_value_groups'")
+    row = c.fetchone()
+    high_value_groups = json.loads(row[0]) if row else []
+
+    total_high_value = 0
+    cracked_high_value = 0
+
+    if high_value_groups:
+        placeholders = ','.join('?' * len(high_value_groups))
+        params = [g.lower() for g in high_value_groups]
+
+        c.execute(f"""
+            SELECT COUNT(DISTINCT u.id)
+            FROM users u
+            JOIN user_groups ug ON u.id = ug.user_id
+            WHERE lower(ug.group_name) IN ({placeholders})
+        """, params)
+        total_high_value = c.fetchone()[0]
+
+        c.execute(f"""
+            SELECT COUNT(DISTINCT u.id)
+            FROM users u
+            JOIN hashes h ON u.id = h.user_id
+            JOIN user_groups ug ON u.id = ug.user_id
+            WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
+            AND lower(ug.group_name) IN ({placeholders})
+        """, params)
+        cracked_high_value = c.fetchone()[0]
+
+    c.execute("""
+        SELECT cracked_password, COUNT(*) as count
+        FROM hashes
+        WHERE is_history = 0 AND cracked_password IS NOT NULL
+        GROUP BY cracked_password
+        ORDER BY count DESC
+        LIMIT 5
+    """)
+    top_common = c.fetchall()
+
+    c.execute("""
+        SELECT DISTINCT cracked_password, length(cracked_password) as pw_length
+        FROM hashes
+        WHERE is_history = 0 AND cracked_password IS NOT NULL
+        ORDER BY pw_length DESC
+        LIMIT 5
+    """)
+    top_longest = c.fetchall()
+
+    c.execute("""
+        SELECT DISTINCT cracked_password, length(cracked_password) as pw_length
+        FROM hashes
+        WHERE is_history = 0 AND cracked_password IS NOT NULL
+        ORDER BY pw_length ASC
+        LIMIT 5
+    """)
+    top_shortest = c.fetchall()
+
+    c.execute("""
+        SELECT length(cracked_password) as pw_length, COUNT(*) as count
+        FROM hashes
+        WHERE is_history = 0 AND cracked_password IS NOT NULL
+        GROUP BY length(cracked_password)
+        ORDER BY pw_length DESC
+    """)
+    lengths_data = c.fetchall()
+    max_count = max([row["count"] for row in lengths_data]) if lengths_data else 1
+
     return render_template('dashboard.html',
                            total_accounts=total_accounts,
                            total_passwords=total_passwords,
-                           total_cracked=total_cracked)
+                           total_cracked=total_cracked,
+                           total_policy_violations=total_policy_violations,
+                           total_kerberoastable=total_kerberoastable,
+                           cracked_kerberoastable=cracked_kerberoastable,
+                           total_asreproastable=total_asreproastable,
+                           cracked_asreproastable=cracked_asreproastable,
+                           total_pwdneverexpires=total_pwdneverexpires,
+                           total_passwordnotreqd=total_passwordnotreqd,
+                           total_high_value=total_high_value,
+                           cracked_high_value=cracked_high_value,
+                           top_common=top_common,
+                           top_longest=top_longest,
+                           top_shortest=top_shortest,
+                           lengths=lengths_data,
+                           max_count=max_count)
+
 
 @app.route('/lengths')
 def lengths():
@@ -57,10 +171,7 @@ def lengths():
     """)
     lengths_data = c.fetchall()
 
-    max_count = max([row["count"] for row in lengths_data]) if lengths_data else 1
-
-
-    return render_template('lengths.html', lengths=lengths_data, max_count=max_count)
+    return render_template('lengths.html', lengths=lengths_data)
 
 @app.route('/shared')
 def shared():
