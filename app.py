@@ -131,7 +131,7 @@ def dashboard():
         FROM hashes
         WHERE is_history = 0 AND cracked_password IS NOT NULL
         GROUP BY length(cracked_password)
-        ORDER BY pw_length DESC
+        ORDER BY pw_length ASC
     """)
     lengths_data = c.fetchall()
     max_count = max([row["count"] for row in lengths_data]) if lengths_data else 1

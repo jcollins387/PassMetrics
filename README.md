@@ -30,16 +30,16 @@ hashcat -m 1000 extracted_hashes.ntds wordlist.txt
 This will produce a `hashcat.potfile` with the cracked passwords.
 
 ### 4. Running the Analyzer
-The primary script for ingestion is `analyze_hashes.py`. It requires the NTDS file and the Hashcat potfile. You can also optionally include Bloodhound data, password policy rules, and high-value target definitions.
+The primary script for ingestion is `adpa.py`. It requires the NTDS file and the Hashcat potfile. You can also optionally include Bloodhound data, password policy rules, and high-value target definitions.
 
 **Basic Example:**
 ```bash
-python analyze_hashes.py --ntds extracted_hashes.ntds --potfile hashcat.potfile
+python adpa.py --ntds extracted_hashes.ntds --potfile hashcat.potfile
 ```
 
 **Advanced Example with BloodHound and Policy:**
 ```bash
-python analyze_hashes.py \
+python adpa.py \
     --ntds extracted_hashes.ntds \
     --potfile hashcat.potfile \
     --bloodhound bloodhound_users.json bloodhound_groups.json \
@@ -54,7 +54,7 @@ python analyze_hashes.py \
 - `example_high_value_groups.txt`: A sample list of high value groups (one per line). Pass this file with the `--high-value` flag to track and filter cracked accounts belonging to these groups in the web report.
 
 ### 5. Viewing the Reports
-After `analyze_hashes.py` finishes, it will generate an SQLite database named `analysis.db`.
+After `adpa.py` finishes, it will generate an SQLite database named `analysis.db`.
 You can view the interactive reports using the Flask web portal.
 
 Start the web server:

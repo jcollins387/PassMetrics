@@ -77,14 +77,22 @@
 
 <div class="card">
     <h2>Password Length Distribution</h2>
-    <div style="width: 100%; max-width: 600px;">
+    <div style="display: flex; align-items: flex-end; height: 300px; width: 100%; max-width: 800px; padding-left: 50px; position: relative; border-left: 1px solid #555; border-bottom: 1px solid #555; margin-bottom: 40px; margin-top: 20px;">
+        <!-- Y-axis label -->
+        <div style="position: absolute; left: -40px; top: 50%; transform: translateY(-50%) rotate(-90deg); transform-origin: center; font-weight: bold;">
+            Count
+        </div>
+
+        <!-- X-axis label -->
+        <div style="position: absolute; bottom: -30px; left: 50%; transform: translateX(-50%); font-weight: bold;">
+            Password Length
+        </div>
+
         {% for row in lengths %}
-        <div style="display: flex; align-items: center; margin-bottom: 5px;">
-            <div style="width: 50px; text-align: right; padding-right: 10px;">{{ row.pw_length }}</div>
-            <div style="flex-grow: 1; background: #eee; height: 20px; position: relative;">
-                <div style="background: #007bff; height: 100%; width: {{ (row.count / max_count * 100) }}%;"></div>
-            </div>
-            <div style="width: 50px; padding-left: 10px;">{{ row.count }}</div>
+        <div style="display: flex; flex-direction: column; align-items: center; justify-content: flex-end; flex: 1; height: 100%; margin: 0 2px; group: hover;">
+            <div style="font-size: 0.8em; margin-bottom: 2px;">{{ row.count }}</div>
+            <div style="background: #007bff; width: 100%; min-width: 10px; height: {{ (row.count / max_count * 100) }}%; transition: height 0.3s ease;"></div>
+            <div style="margin-top: 5px; font-size: 0.9em;">{{ row.pw_length }}</div>
         </div>
         {% endfor %}
     </div>
