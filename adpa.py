@@ -13,33 +13,6 @@ from typing import List, Dict, Optional, Set
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-@dataclass
-class HashData:
-    lm_hash: str
-    nt_hash: str
-    is_history: bool
-    cracked_password: Optional[str] = None
-    redacted_password: Optional[str] = None
-
-@dataclass
-class UserData:
-    domain: str
-    username: str
-    rid: int
-    enabled: bool = True  # Default true, overwritten by bloodhound if exists
-    hashes: List[HashData] = field(default_factory=list)
-    groups: Set[str] = field(default_factory=set)
-    kerberoastable: bool = False
-    asreproastable: bool = False
-    pwdneverexpires: bool = False
-    passwordnotreqd: bool = False
-
-    @property
-    def current_hash(self) -> Optional[HashData]:
-        for h in self.hashes:
-            if not h.is_history:
-                return h
-        return None
 
 def init_db(db_path: str):
     conn = sqlite3.connect(db_path)
