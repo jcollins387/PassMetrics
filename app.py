@@ -327,7 +327,7 @@ def export_length_csv():
     c = db.cursor()
 
     c.execute('''
-        SELECT u.domain, u.username, pv.reason
+        SELECT u.domain, u.username, pv.reason, pv.policy_name
         FROM users u
         LEFT JOIN hashes h ON u.id = h.user_id AND h.is_history = 0 AND h.cracked_password IS NOT NULL
         LEFT JOIN policy_violations pv ON u.id = pv.user_id
@@ -338,12 +338,13 @@ def export_length_csv():
 
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(['Domain', 'Username', 'Length Violation', 'Requirement'])
+    cw.writerow(['Domain', 'Username', 'Length Violation', 'Requirement', 'Policy Name'])
 
     for row in rows:
         domain = row['domain']
         username = row['username']
         reason = row['reason'] or ''
+        policy_name = row['policy_name'] or ''
         reason_list = [r.strip() for r in reason.split(',')] if reason else []
 
         length_req = ''
@@ -358,7 +359,7 @@ def export_length_csv():
                 is_violation = 'TRUE'
                 break
 
-        cw.writerow([domain, username, is_violation, length_req])
+        cw.writerow([domain, username, is_violation, length_req, policy_name])
 
     output = si.getvalue()
     return Response(
