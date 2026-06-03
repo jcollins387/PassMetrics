@@ -467,13 +467,6 @@ def parse_policy(file_path: Optional[str]) -> Dict:
         logging.error(f"Failed to read policy file: {e}")
         return {}
 
-def redact_string(value: str) -> str:
-    if not value:
-        return value
-    if len(value) <= 2:
-        return '*' * len(value)
-    return value[0] + '*' * (len(value) - 2) + value[-1]
-
 def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bool):
     import re
     logging.info("Calculating policy violations and database setup...")
