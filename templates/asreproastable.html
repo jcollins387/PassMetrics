@@ -15,7 +15,7 @@
         <tr>
             <td>{{ row.domain }}</td>
             <td>{{ row.username }}</td>
-            <td>{{ row.cracked_password or 'Unknown' }}</td>
+            <td>{{ row.cracked_password if row.cracked_password is not none else '' }}</td>
         </tr>
         {% endfor %}
     </table>

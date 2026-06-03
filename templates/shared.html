@@ -15,7 +15,7 @@
         {% for row in shared %}
         <tr>
             <td>{{ row.nt_hash }}</td>
-            <td>{% if row.cracked_password is none %}{% elif row.cracked_password == 'Unknown' %}Unknown{% else %}{{ row.cracked_password }}{% endif %}</td>
+            <td>{{ row.cracked_password if row.cracked_password is not none else '' }}</td>
             <td>{{ row.count }}</td>
             <td>
                 <details>
