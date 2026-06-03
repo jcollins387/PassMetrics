@@ -439,7 +439,7 @@ def policy():
     c = db.cursor()
 
     c.execute("""
-        SELECT u.domain, u.username, pv.reason
+        SELECT u.domain, u.username, pv.policy_name, pv.reason
         FROM policy_violations pv
         JOIN users u ON pv.user_id = u.id
         ORDER BY u.domain, u.username

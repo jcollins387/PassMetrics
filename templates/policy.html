@@ -9,12 +9,14 @@
         <tr>
             <th>Domain</th>
             <th>Username</th>
+            <th>Policy Name</th>
             <th>Reason</th>
         </tr>
         {% for row in violations %}
         <tr>
             <td>{{ row.domain }}</td>
             <td>{{ row.username }}</td>
+            <td>{{ row.policy_name }}</td>
             <td>{{ row.reason }}</td>
         </tr>
         {% endfor %}
