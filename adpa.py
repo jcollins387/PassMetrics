@@ -502,6 +502,7 @@ def redact_string(value: str) -> str:
     return value[0] + '*' * (len(value) - 2) + value[-1]
 
 def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bool):
+    import re
     logging.info("Calculating policy violations and database setup...")
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -524,7 +525,7 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     # Policy Violations
     logging.info("Calculating policy violations...")
     c.execute(f"""
-        SELECT u.id, h.cracked_password, group_concat(lower(ug.group_name)), u.distinguishedname, u.pwdlastset
+        SELECT u.id, h.cracked_password, group_concat(lower(ug.group_name)), u.distinguishedname, u.pwdlastset, u.username
         FROM users u
         JOIN hashes h ON u.id = h.user_id
         LEFT JOIN user_groups ug ON u.id = ug.user_id
@@ -544,40 +545,74 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
         user_groups_lower = row[2].split(",") if row[2] else []
         dn_lower = row[3].lower() if row[3] else ""
         pwdlastset = row[4]
+        username = row[5] or ""
 
-        applicable_policy = base_policy
-        policy_name = base_policy.get("name", "Base Policy")
-        for group, g_policy in fgpp_policies.items():
-            group_lower = group.lower()
-            if group_lower in user_groups_lower or (dn_lower and f"{group_lower}," in f"{dn_lower},"):
-                applicable_policy = g_policy
-                policy_name = g_policy.get("name", f"FGPP: {group}")
-                break
+        matched_policies = []
+        for policy_key, g_policy in fgpp_policies.items():
+            match_groups = [g.lower() for g in g_policy.get("match_groups", [])]
+            match_ous = [ou.lower() for ou in g_policy.get("match_ous", [])]
+            match_usernames = g_policy.get("match_usernames", [])
 
-        if applicable_policy:
-            min_len = applicable_policy.get("length", 0)
-            req_complexity = applicable_policy.get("complexity", False)
-            max_lifetime = applicable_policy.get("lifetime", 0)
+            matched = False
 
-            reasons = []
-            if len(pwd) < min_len:
-                reasons.append(f"Length < {min_len}")
+            # Check groups
+            for g in match_groups:
+                if g in user_groups_lower:
+                    matched = True
+                    break
 
-            if req_complexity:
-                has_upper = any(char.isupper() for char in pwd)
-                has_lower = any(char.islower() for char in pwd)
-                has_digit = any(char.isdigit() for char in pwd)
-                has_special = any(not char.isalnum() for char in pwd)
-                if sum([has_upper, has_lower, has_digit, has_special]) < 3:
-                    reasons.append("Fails complexity")
+            # Check OUs
+            if not matched and dn_lower:
+                for ou in match_ous:
+                    if ou in dn_lower:
+                        matched = True
+                        break
 
-            if max_lifetime > 0 and pwdlastset:
-                age_days = (current_time - pwdlastset) / 86400.0
-                if age_days > max_lifetime:
-                    reasons.append(f"Lifetime > {max_lifetime} days")
+            # Check usernames
+            if not matched and username:
+                for regex in match_usernames:
+                    if re.search(regex, username, re.IGNORECASE):
+                        matched = True
+                        break
 
-            if reasons:
-                violations.append((user_id, policy_name, ", ".join(reasons)))
+            if matched:
+                matched_policies.append(g_policy)
+
+        if matched_policies:
+            min_len = max([p.get("length", 0) for p in matched_policies])
+            req_complexity = any([p.get("complexity", False) for p in matched_policies])
+
+            lifetimes = [p.get("lifetime", 0) for p in matched_policies]
+            non_zero_lifetimes = [l for l in lifetimes if l > 0]
+            max_lifetime = min(non_zero_lifetimes) if non_zero_lifetimes else 0
+
+            policy_names = [p.get("name", "Unknown FGPP") for p in matched_policies]
+            policy_name = ", ".join(policy_names)
+        else:
+            min_len = base_policy.get("length", 0)
+            req_complexity = base_policy.get("complexity", False)
+            max_lifetime = base_policy.get("lifetime", 0)
+            policy_name = base_policy.get("name", "Base Policy")
+
+        reasons = []
+        if len(pwd) < min_len:
+            reasons.append(f"Length < {min_len}")
+
+        if req_complexity:
+            has_upper = any(char.isupper() for char in pwd)
+            has_lower = any(char.islower() for char in pwd)
+            has_digit = any(char.isdigit() for char in pwd)
+            has_special = any(not char.isalnum() for char in pwd)
+            if sum([has_upper, has_lower, has_digit, has_special]) < 3:
+                reasons.append("Fails complexity")
+
+        if max_lifetime > 0 and pwdlastset:
+            age_days = (current_time - pwdlastset) / 86400.0
+            if age_days > max_lifetime:
+                reasons.append(f"Lifetime > {max_lifetime} days")
+
+        if reasons:
+            violations.append((user_id, policy_name, ", ".join(reasons)))
 
     if violations:
         c.executemany("INSERT INTO policy_violations (user_id, policy_name, reason) VALUES (?, ?, ?)", violations)

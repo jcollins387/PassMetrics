@@ -1,5 +1,5 @@
 {
-  "_comment": "Fine-Grained Password Policies (fgpp) override the base policy. Matching is an exact case-insensitive match for Group Names, or a substring match for Distinguished Names (OUs). The first matching policy found in the dictionary will be applied to the user.",
+  "_comment": "Fine-Grained Password Policies (fgpp) override the base policy. You can match accounts via match_groups, match_ous (substring match), or match_usernames (regex). If a user matches multiple policies, the most restrictive settings (longest length, required complexity, shortest lifetime) are applied.",
   "base": {
     "name": "Default Domain Policy",
     "length": 8,
@@ -7,20 +7,18 @@
     "lifetime": 90
   },
   "fgpp": {
-    "Domain Admins": {
-      "name": "Domain Admins FGPP",
+    "Admins FGPP": {
+      "name": "Admins FGPP",
+      "match_groups": ["Domain Admins", "Enterprise Admins"],
       "length": 14,
       "complexity": true,
       "lifetime": 30
     },
-    "Enterprise Admins": {
-      "name": "Enterprise Admins FGPP",
-      "length": 14,
-      "complexity": true,
-      "lifetime": 30
-    },
-    "OU=SERVICEACCOUNTS,DC=PRIMARY,DC=DOMAIN,DC=COM": {
+    "Service Accounts FGPP": {
       "name": "Service Accounts FGPP",
+      "match_groups": ["Service Accounts Group"],
+      "match_ous": ["OU=SERVICEACCOUNTS,DC=PRIMARY", "OU=SERVICEACCOUNTS,DC=SECONDARY"],
+      "match_usernames": ["^svc[-._]"],
       "length": 20,
       "complexity": false,
       "lifetime": 365
