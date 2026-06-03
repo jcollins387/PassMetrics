@@ -256,6 +256,117 @@ def export_csv():
         headers={"Content-disposition": "attachment; filename=report.csv"}
     )
 
+@app.route('/export_reset_csv')
+def export_reset_csv():
+    db = get_db()
+    c = db.cursor()
+
+    c.execute('''
+        SELECT u.domain, u.username,
+               CASE WHEN h.cracked_password IS NOT NULL THEN 'TRUE' ELSE '' END as needs_reset
+        FROM users u
+        LEFT JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
+        ORDER BY u.domain, u.username
+    ''')
+    rows = c.fetchall()
+
+    si = io.StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['Domain', 'Username', 'Needs Reset'])
+
+    for row in rows:
+        cw.writerow([row['domain'], row['username'], row['needs_reset']])
+
+    output = si.getvalue()
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-disposition": "attachment; filename=accounts_needing_reset.csv"}
+    )
+
+
+@app.route('/export_shared_csv')
+def export_shared_csv():
+    db = get_db()
+    c = db.cursor()
+
+    c.execute('''
+        SELECT u.domain, u.username,
+               CASE WHEN hc.uses > 1 THEN 'TRUE' ELSE '' END as is_shared,
+               IFNULL(hc.uses, 0) as total_uses
+        FROM users u
+        LEFT JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
+        LEFT JOIN (
+            SELECT lower(nt_hash) as hash_val, COUNT(*) as uses
+            FROM hashes
+            WHERE is_history = 0 AND nt_hash IS NOT NULL AND nt_hash != ''
+            GROUP BY lower(nt_hash)
+        ) hc ON lower(h.nt_hash) = hc.hash_val
+        ORDER BY u.domain, u.username
+    ''')
+    rows = c.fetchall()
+
+    si = io.StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['Domain', 'Username', 'Shared Hash', 'Total Uses'])
+
+    for row in rows:
+        cw.writerow([row['domain'], row['username'], row['is_shared'], row['total_uses'] if row['is_shared'] == 'TRUE' else ''])
+
+    output = si.getvalue()
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-disposition": "attachment; filename=shared_passwords.csv"}
+    )
+
+
+@app.route('/export_length_csv')
+def export_length_csv():
+    db = get_db()
+    c = db.cursor()
+
+    c.execute('''
+        SELECT u.domain, u.username, pv.reason
+        FROM users u
+        LEFT JOIN hashes h ON u.id = h.user_id AND h.is_history = 0 AND h.cracked_password IS NOT NULL
+        LEFT JOIN policy_violations pv ON u.id = pv.user_id
+        WHERE h.id IS NOT NULL
+        ORDER BY u.domain, u.username
+    ''')
+    rows = c.fetchall()
+
+    si = io.StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['Domain', 'Username', 'Length Violation', 'Requirement'])
+
+    for row in rows:
+        domain = row['domain']
+        username = row['username']
+        reason = row['reason'] or ''
+        reason_list = [r.strip() for r in reason.split(',')] if reason else []
+
+        length_req = ''
+        is_violation = ''
+        for r in reason_list:
+            if r.lower().startswith('length'):
+                parts = r.split(' ', 1)
+                if len(parts) > 1:
+                    length_req = parts[1]
+                else:
+                    length_req = r
+                is_violation = 'TRUE'
+                break
+
+        cw.writerow([domain, username, is_violation, length_req])
+
+    output = si.getvalue()
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-disposition": "attachment; filename=length_violations.csv"}
+    )
+
 @app.route('/lengths')
 def lengths():
     db = get_db()
@@ -328,7 +439,7 @@ def policy():
     c = db.cursor()
 
     c.execute("""
-        SELECT u.domain, u.username, pv.reason
+        SELECT u.domain, u.username, pv.policy_name, pv.reason
         FROM policy_violations pv
         JOIN users u ON pv.user_id = u.id
         ORDER BY u.domain, u.username

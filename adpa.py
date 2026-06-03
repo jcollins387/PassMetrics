@@ -79,6 +79,7 @@ def init_db(db_path: str):
         );
         CREATE TABLE IF NOT EXISTS policy_violations (
             user_id INTEGER,
+            policy_name TEXT,
             reason TEXT,
             FOREIGN KEY(user_id) REFERENCES users(id)
         );
@@ -545,10 +546,12 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
         pwdlastset = row[4]
 
         applicable_policy = base_policy
+        policy_name = base_policy.get("name", "Base Policy")
         for group, g_policy in fgpp_policies.items():
             group_lower = group.lower()
             if group_lower in user_groups_lower or (dn_lower and f"{group_lower}," in f"{dn_lower},"):
                 applicable_policy = g_policy
+                policy_name = g_policy.get("name", f"FGPP: {group}")
                 break
 
         if applicable_policy:
@@ -574,10 +577,10 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
                     reasons.append(f"Lifetime > {max_lifetime} days")
 
             if reasons:
-                violations.append((user_id, ", ".join(reasons)))
+                violations.append((user_id, policy_name, ", ".join(reasons)))
 
     if violations:
-        c.executemany("INSERT INTO policy_violations (user_id, reason) VALUES (?, ?)", violations)
+        c.executemany("INSERT INTO policy_violations (user_id, policy_name, reason) VALUES (?, ?, ?)", violations)
         conn.commit()
 
     conn.close()
