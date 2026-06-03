@@ -51,6 +51,7 @@ python adpa.py \
 
 **Using the Example Files:**
 - `example_policy.json`: A sample password policy definition. You can modify it to match your organization's required base password length/complexity, and define Fine-Grained Password Policies (FGPP) for specific groups (e.g., Domain Admins) or OUs.
+  - **Policy Names:** The base policy and individual fine-grained password policies require a `"name"` field. This policy name is saved to the database and displayed in a dedicated column on the 'Policy Violations' report page to indicate which policy was tested against the account.
   - **Matching Logic:** The script evaluates the base policy against all accounts. It then checks the `fgpp` dictionary in the JSON. If an account is a member of a group that exactly matches a key in `fgpp` (case-insensitive), or if the account's Distinguished Name (DN) contains a key from `fgpp` as a substring, that FGPP policy supersedes the base policy.
   - **Precedence:** The script uses the *first* matching policy it finds in the `fgpp` dictionary. If a user is part of multiple groups that have defined FGPPs, the one listed first in your JSON file takes precedence.
 - `example_high_value_groups.txt`: A sample list of high value groups (one per line). Pass this file with the `--high-value` flag to track and filter cracked accounts belonging to these groups in the web report.
