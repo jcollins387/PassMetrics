@@ -180,25 +180,25 @@ def export_csv():
 
     # Find all unique policy violations dynamically based on the reason string
     violation_types = set()
-    for row in rows:
-        reason = row['reason']
-        if reason:
-            for r in reason.split(','):
-                r = r.strip()
-                if r:
-                    # e.g., "Length < 8" -> "Length", "Fails complexity" -> "Complexity", "Lifetime > 90 days" -> "Lifetime"
-                    # However, to be fully dynamic, we extract the first word or handle known cases if they vary,
-                    # but the cleanest dynamic way is to take the whole string if it's unique, or prefix it.
-                    # Given the examples: Length < x, Fails complexity, Lifetime > x days
-                    # Let's extract the core violation type:
-                    if r.lower().startswith('length'):
-                        violation_types.add('Length')
-                    elif 'complexity' in r.lower():
-                        violation_types.add('Complexity')
-                    elif r.lower().startswith('lifetime'):
-                        violation_types.add('Lifetime')
-                    else:
-                        violation_types.add(r) # fallback for fully dynamic
+    unique_reasons = {row['reason'] for row in rows if row['reason']}
+    for reason in unique_reasons:
+        for r in reason.split(','):
+            r = r.strip()
+            if r:
+                r_lower = r.lower()
+                # e.g., "Length < 8" -> "Length", "Fails complexity" -> "Complexity", "Lifetime > 90 days" -> "Lifetime"
+                # However, to be fully dynamic, we extract the first word or handle known cases if they vary,
+                # but the cleanest dynamic way is to take the whole string if it's unique, or prefix it.
+                # Given the examples: Length < x, Fails complexity, Lifetime > x days
+                # Let's extract the core violation type:
+                if r_lower.startswith('length'):
+                    violation_types.add('Length')
+                elif 'complexity' in r_lower:
+                    violation_types.add('Complexity')
+                elif r_lower.startswith('lifetime'):
+                    violation_types.add('Lifetime')
+                else:
+                    violation_types.add(r) # fallback for fully dynamic
 
     # Ensure consistent ordering
     violation_types = sorted(list(violation_types))
