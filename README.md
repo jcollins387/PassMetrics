@@ -50,10 +50,13 @@ python adpa.py \
 *Note: The `--redact` flag will redact the cracked passwords in the database and web reports.*
 
 **Using the Example Files:**
-- `example_policy.json`: A sample password policy definition. You can modify it to match your organization's required base password length/complexity, and define Fine-Grained Password Policies (FGPP) for specific groups (e.g., Domain Admins) or OUs.
+- `example_policy.json`: A sample password policy definition. You can modify it to match your organization's required base password length/complexity, and define Fine-Grained Password Policies (FGPP) for specific groups (e.g., Domain Admins), OUs, or username patterns (e.g., service accounts).
   - **Policy Names:** The base policy and individual fine-grained password policies require a `"name"` field. This policy name is saved to the database and displayed in a dedicated column on the 'Policy Violations' report page to indicate which policy was tested against the account.
-  - **Matching Logic:** The script evaluates the base policy against all accounts. It then checks the `fgpp` dictionary in the JSON. If an account is a member of a group that exactly matches a key in `fgpp` (case-insensitive), or if the account's Distinguished Name (DN) contains a key from `fgpp` as a substring, that FGPP policy supersedes the base policy.
-  - **Precedence:** The script uses the *first* matching policy it finds in the `fgpp` dictionary. If a user is part of multiple groups that have defined FGPPs, the one listed first in your JSON file takes precedence.
+  - **Matching Logic:** The script evaluates the base policy against all accounts. It then evaluates all policies defined in the `fgpp` dictionary. For each FGPP policy, an account is a match if it meets *any* of the following conditions:
+    - `match_groups`: The account is a member of a group that matches exactly (case-insensitive).
+    - `match_ous`: The account's Distinguished Name (DN) contains a string from this list as a substring (case-insensitive).
+    - `match_usernames`: The account's username matches a regular expression defined in this list.
+  - **Multiple Match Logic (Most Restrictive):** If an account matches multiple FGPP rules (e.g., it is in "Domain Admins" and its username starts with "svc-"), the script will generate a composite policy applying the most restrictive settings from all matched policies (highest minimum length, true if any require complexity, and lowest maximum lifetime).
 - `example_high_value_groups.txt`: A sample list of high value groups (one per line). Pass this file with the `--high-value` flag to track and filter cracked accounts belonging to these groups in the web report.
   - **Matching Logic:** The script performs an exact, case-insensitive match against the group name. It is not a fuzzy match. For example, "Admin" will not match "Domain Admins". A user must be explicitly listed as a member of the exact group name provided in this file to be considered a high-value target.
 
