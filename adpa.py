@@ -561,10 +561,10 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
                     matched = True
                     break
 
-            # Check OUs
-            if not matched and dn_lower:
+            # Check OUs (both in DN as an OU substring or directly matching a group name)
+            if not matched:
                 for ou in match_ous:
-                    if ou in dn_lower:
+                    if (dn_lower and ou in dn_lower) or (ou in user_groups_lower):
                         matched = True
                         break
 
