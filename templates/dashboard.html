@@ -39,7 +39,7 @@
                 </tr>
                 {% for row in top_common %}
                 <tr>
-                    <td>{{ row.cracked_password }}</td>
+                    <td>{{ row.cracked_password if row.cracked_password is not none else '' }}</td>
                     <td>{{ row.count }}</td>
                 </tr>
                 {% endfor %}
@@ -55,7 +55,7 @@
                 </tr>
                 {% for row in top_longest %}
                 <tr>
-                    <td>{{ row.cracked_password }}</td>
+                    <td>{{ row.cracked_password if row.cracked_password is not none else '' }}</td>
                     <td>{{ row.pw_length }}</td>
                 </tr>
                 {% endfor %}
@@ -71,7 +71,7 @@
                 </tr>
                 {% for row in top_shortest %}
                 <tr>
-                    <td>{{ row.cracked_password }}</td>
+                    <td>{{ row.cracked_password if row.cracked_password is not none else '' }}</td>
                     <td>{{ row.pw_length }}</td>
                 </tr>
                 {% endfor %}
