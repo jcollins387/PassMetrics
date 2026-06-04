@@ -572,11 +572,21 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
             reasons.append(f"Length < {min_len}")
 
         if req_complexity:
-            has_upper = any(char.isupper() for char in pwd)
-            has_lower = any(char.islower() for char in pwd)
-            has_digit = any(char.isdigit() for char in pwd)
-            has_special = any(not char.isalnum() for char in pwd)
-            if sum([has_upper, has_lower, has_digit, has_special]) < 3:
+            has_upper = has_lower = has_digit = has_special = False
+            for char in pwd:
+                if char.isupper():
+                    has_upper = True
+                elif char.islower():
+                    has_lower = True
+                elif char.isdigit():
+                    has_digit = True
+                elif not char.isalnum():
+                    has_special = True
+
+                if has_upper + has_lower + has_digit + has_special >= 3:
+                    break
+
+            if has_upper + has_lower + has_digit + has_special < 3:
                 reasons.append("Fails complexity")
 
         if max_lifetime > 0 and pwdlastset:
