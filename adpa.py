@@ -58,6 +58,12 @@ def init_db(db_path: str):
             key TEXT PRIMARY KEY,
             value TEXT
         );
+        CREATE TABLE IF NOT EXISTS shared_hashes (
+            nt_hash TEXT PRIMARY KEY,
+            cracked_password TEXT,
+            count INTEGER,
+            shared_by TEXT
+        );
 
         CREATE INDEX IF NOT EXISTS idx_users_domain_username ON users(domain, username);
         CREATE INDEX IF NOT EXISTS idx_users_flags ON users(enabled, kerberoastable, asreproastable);
@@ -645,6 +651,23 @@ def main():
 
     calculate_metrics(db_path, policy, args.redact, args.enabled_only)
     logging.info("Policy violations and metrics calculated.")
+
+    logging.info("Pre-calculating shared hashes...")
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO shared_hashes (nt_hash, cracked_password, count, shared_by)
+        SELECT lower(h.nt_hash), h.cracked_password, COUNT(h.id),
+               GROUP_CONCAT(u.domain || '\\' || u.username, ', ')
+        FROM hashes h
+        JOIN users u ON h.user_id = u.id
+        WHERE h.is_history = 0 AND h.nt_hash IS NOT NULL AND h.nt_hash != ''
+        GROUP BY lower(h.nt_hash)
+        HAVING COUNT(h.id) > 1
+    """)
+    conn.commit()
+    conn.close()
+    logging.info("Shared hashes pre-calculated.")
 
     # HTML report generation removed in favor of dynamic portal.
     # Database is persisted.

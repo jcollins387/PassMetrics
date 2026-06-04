@@ -285,28 +285,20 @@ def export_shared_csv():
     c = db.cursor()
 
     c.execute('''
-        SELECT u.domain, u.username,
-               CASE WHEN hc.uses IS NOT NULL THEN 'TRUE' ELSE '' END as is_shared,
-               CASE WHEN h.nt_hash IS NOT NULL AND h.nt_hash != '' AND hc.uses IS NULL THEN 1 ELSE IFNULL(hc.uses, 0) END as total_uses
+        SELECT u.domain, u.username, sh.count as reuse_count
         FROM users u
-        LEFT JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
-        LEFT JOIN (
-            SELECT lower(nt_hash) as hash_val, COUNT(*) as uses
-            FROM hashes
-            WHERE is_history = 0 AND nt_hash IS NOT NULL AND nt_hash != ''
-            GROUP BY lower(nt_hash)
-            HAVING COUNT(*) > 1
-        ) hc ON lower(h.nt_hash) = hc.hash_val
+        JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
+        JOIN shared_hashes sh ON lower(h.nt_hash) = sh.nt_hash
         ORDER BY u.domain, u.username
     ''')
     rows = c.fetchall()
 
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(['Domain', 'Username', 'Shared Hash', 'Total Uses'])
+    cw.writerow(['Domain', 'Username', 'Reuse Count'])
 
     for row in rows:
-        cw.writerow([row['domain'], row['username'], row['is_shared'], row['total_uses'] if row['is_shared'] == 'TRUE' else ''])
+        cw.writerow([row['domain'], row['username'], row['reuse_count']])
 
     output = si.getvalue()
     return Response(
@@ -390,13 +382,8 @@ def shared():
     c = db.cursor()
 
     c.execute("""
-        SELECT lower(h.nt_hash) as nt_hash, h.cracked_password, COUNT(h.id) as count,
-               GROUP_CONCAT(u.domain || '\\' || u.username, ', ') as shared_by
-        FROM hashes h
-        JOIN users u ON h.user_id = u.id
-        WHERE h.is_history = 0
-        GROUP BY lower(h.nt_hash)
-        HAVING COUNT(h.id) > 1
+        SELECT nt_hash, cracked_password, count, shared_by
+        FROM shared_hashes
         ORDER BY count DESC
         LIMIT ? OFFSET ?
     """, (per_page, offset))
