@@ -552,15 +552,12 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
                 matched_policies.append(p['policy'])
 
         if matched_policies:
-            min_len = max([p.get("length", 0) for p in matched_policies])
-            req_complexity = any([p.get("complexity", False) for p in matched_policies])
+            min_len = max(p.get("length", 0) for p in matched_policies)
+            req_complexity = any(p.get("complexity", False) for p in matched_policies)
 
-            lifetimes = [p.get("lifetime", 0) for p in matched_policies]
-            non_zero_lifetimes = [l for l in lifetimes if l > 0]
-            max_lifetime = min(non_zero_lifetimes) if non_zero_lifetimes else 0
+            max_lifetime = min((p.get("lifetime", 0) for p in matched_policies if p.get("lifetime", 0) > 0), default=0)
 
-            policy_names = [p.get("name", "Unknown FGPP") for p in matched_policies]
-            policy_name = ", ".join(policy_names)
+            policy_name = ", ".join(p.get("name", "Unknown FGPP") for p in matched_policies)
         else:
             min_len = base_policy.get("length", 0)
             req_complexity = base_policy.get("complexity", False)
