@@ -286,8 +286,8 @@ def export_shared_csv():
 
     c.execute('''
         SELECT u.domain, u.username,
-               CASE WHEN hc.uses > 1 THEN 'TRUE' ELSE '' END as is_shared,
-               IFNULL(hc.uses, 0) as total_uses
+               CASE WHEN hc.uses IS NOT NULL THEN 'TRUE' ELSE '' END as is_shared,
+               CASE WHEN h.nt_hash IS NOT NULL AND h.nt_hash != '' AND hc.uses IS NULL THEN 1 ELSE IFNULL(hc.uses, 0) END as total_uses
         FROM users u
         LEFT JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
         LEFT JOIN (
@@ -295,6 +295,7 @@ def export_shared_csv():
             FROM hashes
             WHERE is_history = 0 AND nt_hash IS NOT NULL AND nt_hash != ''
             GROUP BY lower(nt_hash)
+            HAVING COUNT(*) > 1
         ) hc ON lower(h.nt_hash) = hc.hash_val
         ORDER BY u.domain, u.username
     ''')
