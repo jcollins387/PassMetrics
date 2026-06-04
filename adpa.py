@@ -6,6 +6,7 @@ import html
 import sqlite3
 import math
 import time
+import re
 import concurrent.futures
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set
@@ -505,6 +506,16 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
 
     current_time = time.time()
 
+    # Pre-process FGPP policies
+    processed_fgpp = []
+    for policy_key, g_policy in fgpp_policies.items():
+        processed_fgpp.append({
+            'policy': g_policy,
+            'match_groups': set(g.lower() for g in g_policy.get("match_groups", [])),
+            'match_ous': [ou.lower() for ou in g_policy.get("match_ous", [])],
+            'match_usernames': [re.compile(regex, re.IGNORECASE) for regex in g_policy.get("match_usernames", [])]
+        })
+
     for row in c.fetchall():
         user_id = row[0]
         pwd = row[1]
@@ -514,35 +525,31 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
         username = row[5] or ""
 
         matched_policies = []
-        for policy_key, g_policy in fgpp_policies.items():
-            match_groups = [g.lower() for g in g_policy.get("match_groups", [])]
-            match_ous = [ou.lower() for ou in g_policy.get("match_ous", [])]
-            match_usernames = g_policy.get("match_usernames", [])
-
+        for p in processed_fgpp:
             matched = False
 
             # Check groups
-            for g in match_groups:
+            for g in p['match_groups']:
                 if g in user_groups_lower:
                     matched = True
                     break
 
             # Check OUs (both in DN as an OU substring or directly matching a group name)
             if not matched:
-                for ou in match_ous:
+                for ou in p['match_ous']:
                     if (dn_lower and ou in dn_lower) or (ou in user_groups_lower):
                         matched = True
                         break
 
             # Check usernames
             if not matched and username:
-                for regex in match_usernames:
-                    if re.search(regex, username, re.IGNORECASE):
+                for regex in p['match_usernames']:
+                    if regex.search(username):
                         matched = True
                         break
 
             if matched:
-                matched_policies.append(g_policy)
+                matched_policies.append(p['policy'])
 
         if matched_policies:
             min_len = max([p.get("length", 0) for p in matched_policies])
