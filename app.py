@@ -256,10 +256,10 @@ def export_reset_csv():
     c = db.cursor()
 
     c.execute('''
-        SELECT u.domain, u.username,
-               CASE WHEN h.cracked_password IS NOT NULL THEN 'TRUE' ELSE '' END as needs_reset
+        SELECT u.domain, u.username
         FROM users u
-        LEFT JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
+        JOIN hashes h ON u.id = h.user_id
+        WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
         ORDER BY u.domain, u.username
     ''')
     rows = c.fetchall()
@@ -269,7 +269,7 @@ def export_reset_csv():
     cw.writerow(['Domain', 'Username', 'Needs Reset'])
 
     for row in rows:
-        cw.writerow([row['domain'], row['username'], row['needs_reset']])
+        cw.writerow([row['domain'], row['username'], 'TRUE'])
 
     output = si.getvalue()
     return Response(
