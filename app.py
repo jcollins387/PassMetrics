@@ -136,7 +136,7 @@ def dashboard():
         ORDER BY pw_length ASC
     """)
     lengths_data = c.fetchall()
-    max_count = max([row["count"] for row in lengths_data]) if lengths_data else 1
+    max_count = max(row["count"] for row in lengths_data) if lengths_data else 1
 
     return render_template('dashboard.html',
                            total_accounts=total_accounts,
