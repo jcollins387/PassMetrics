@@ -1,10 +1,7 @@
 import argparse
-import sys
 import json
 import logging
-import html
 import sqlite3
-import math
 import time
 import re
 import concurrent.futures
@@ -177,7 +174,6 @@ def parse_ntds(ntds_path: str, db_path: str):
             is_history = False
             base_username = username
             # NTDS extraction often adds _history followed by some ID, or simply _history
-            import re
             history_match = re.search(r'_history\d*$', username, re.IGNORECASE)
             if history_match:
                 base_username = username[:history_match.start()]
@@ -469,7 +465,6 @@ def parse_policy(file_path: Optional[str]) -> Dict:
         return {}
 
 def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bool):
-    import re
     logging.info("Calculating policy violations and database setup...")
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -642,7 +637,6 @@ def main():
     high_value_groups = parse_high_value(args.high_value)
     policy = parse_policy(args.policy)
 
-    import json
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", ("high_value_groups", json.dumps(high_value_groups)))
