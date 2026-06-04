@@ -1,6 +1,7 @@
 import sqlite3
 import io
 import csv
+import json
 from flask import Flask, render_template, request, g, Response
 
 app = Flask(__name__)
@@ -70,7 +71,6 @@ def dashboard():
     c.execute("SELECT COUNT(*) FROM users WHERE passwordnotreqd = 1")
     total_passwordnotreqd = c.fetchone()[0]
 
-    import json
     c.execute("SELECT value FROM config WHERE key = 'high_value_groups'")
     row = c.fetchone()
     high_value_groups = json.loads(row[0]) if row else []
@@ -447,7 +447,6 @@ def policy():
 
 @app.route('/high_value')
 def high_value():
-    import json
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 50, type=int)
     group_filter = request.args.get('group', 'default')
