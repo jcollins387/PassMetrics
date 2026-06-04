@@ -519,7 +519,7 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     for row in c.fetchall():
         user_id = row[0]
         pwd = row[1]
-        user_groups_lower = row[2].split(",") if row[2] else []
+        user_groups_lower = set(row[2].split(",")) if row[2] else set()
         dn_lower = row[3].lower() if row[3] else ""
         pwdlastset = row[4]
         username = row[5] or ""
