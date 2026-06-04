@@ -230,19 +230,19 @@ def export_csv():
         reason = row['reason'] or ''
         reason_list = [r.strip() for r in reason.split(',')] if reason else []
 
-        for vt in violation_types:
-            found = False
-            for r in reason_list:
-                if vt == 'Length' and r.lower().startswith('length'):
-                    found = True
-                elif vt == 'Complexity' and 'complexity' in r.lower():
-                    found = True
-                elif vt == 'Lifetime' and r.lower().startswith('lifetime'):
-                    found = True
-                elif vt == r:
-                    found = True
+        row_violation_types = set()
+        for r in reason_list:
+            r_lower = r.lower()
+            if r_lower.startswith('length'):
+                row_violation_types.add('Length')
+            if 'complexity' in r_lower:
+                row_violation_types.add('Complexity')
+            if r_lower.startswith('lifetime'):
+                row_violation_types.add('Lifetime')
+            row_violation_types.add(r)
 
-            if found:
+        for vt in violation_types:
+            if vt in row_violation_types:
                 csv_row.append('x')
             else:
                 csv_row.append('')
