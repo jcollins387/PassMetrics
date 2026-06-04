@@ -158,12 +158,6 @@ def dashboard():
                            max_count=max_count)
 
 
-
-import io
-import csv
-from flask import Response
-
-
 @app.route('/export_csv')
 def export_csv():
     db = get_db()
