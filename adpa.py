@@ -7,18 +7,21 @@ import re
 import concurrent.futures
 import secrets
 import string
+import os
+import sys
+import getpass
+import stat
 from werkzeug.security import generate_password_hash
-from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 def init_db(db_path: str):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.executescript('''
+    c.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT,
@@ -83,7 +86,7 @@ def init_db(db_path: str):
         CREATE INDEX IF NOT EXISTS idx_hashes_is_history ON hashes(is_history);
         CREATE INDEX IF NOT EXISTS idx_hashes_history_cracked ON hashes(is_history, cracked_password);
         CREATE INDEX IF NOT EXISTS idx_user_groups_user_id ON user_groups(user_id);
-    ''')
+    """)
     conn.commit()
     conn.close()
 
@@ -100,25 +103,62 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=description,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_help=False
+        add_help=False,
     )
 
-    required = parser.add_argument_group('Required Arguments')
-    required.add_argument('-n', '--ntds', required=True, help="NTDS file containing password hashes")
-    required.add_argument('-p', '--potfile', required=True, help="Hashcat potfile containing the cracked hashes")
+    required = parser.add_argument_group("Required Arguments")
+    required.add_argument(
+        "-n", "--ntds", required=True, help="NTDS file containing password hashes"
+    )
+    required.add_argument(
+        "-p",
+        "--potfile",
+        required=True,
+        help="Hashcat potfile containing the cracked hashes",
+    )
 
-    optional = parser.add_argument_group('Optional Arguments')
-    optional.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS, help="Show this help message and exit")
-    optional.add_argument('-b', '--bloodhound', nargs='+', help="One or more json files generated from bloodhound")
-    optional.add_argument('--policy', help="JSON file containing password policy")
-    optional.add_argument('--high-value', help="File containing high value groups/OUs")
-    optional.add_argument('--enabled-only', action='store_true', help="Show only 'enabled' users (requires BloodHound data)")
-    optional.add_argument('--redact', action='store_true', help="Redact the passwords and hashes in reports")
-    optional.add_argument('--outdir', help="Directory to output HTML reports to. Defaults to report_<timestamp>")
-    optional.add_argument('--domain-mapping', help="JSON file containing 1-to-many domain mappings from NTDS to BloodHound names")
-    optional.add_argument('--interactive', action='store_true', help="Prompt user for ambiguous domain mappings (requires --domain-mapping)")
+    optional = parser.add_argument_group("Optional Arguments")
+    optional.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        default=argparse.SUPPRESS,
+        help="Show this help message and exit",
+    )
+    optional.add_argument(
+        "-b",
+        "--bloodhound",
+        nargs="+",
+        help="One or more json files generated from bloodhound",
+    )
+    optional.add_argument("--policy", help="JSON file containing password policy")
+    optional.add_argument("--high-value", help="File containing high value groups/OUs")
+    optional.add_argument(
+        "--enabled-only",
+        action="store_true",
+        help="Show only 'enabled' users (requires BloodHound data)",
+    )
+    optional.add_argument(
+        "--redact",
+        action="store_true",
+        help="Redact the passwords and hashes in reports",
+    )
+    optional.add_argument(
+        "--outdir",
+        help="Directory to output HTML reports to. Defaults to report_<timestamp>",
+    )
+    optional.add_argument(
+        "--domain-mapping",
+        help="JSON file containing 1-to-many domain mappings from NTDS to BloodHound names",
+    )
+    optional.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt user for ambiguous domain mappings (requires --domain-mapping)",
+    )
 
     return parser.parse_args()
+
 
 def parse_potfile(potfile_path: str, db_path: str):
     """Parses hashcat potfile and inserts hashes into the DB."""
@@ -126,45 +166,59 @@ def parse_potfile(potfile_path: str, db_path: str):
     c = conn.cursor()
     batch = []
 
-    with open(potfile_path, 'r', encoding='utf-8', errors='replace') as f:
+    with open(potfile_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             # Hashcat potfile format is hash:password
-            parts = line.split(':', 1)
+            parts = line.split(":", 1)
             if len(parts) == 2:
                 # NTHashes in potfile are usually 32 chars long. We index by lowercase to avoid case issues
                 h, p = parts
                 if len(h) == 32:
-                    if p.startswith('$HEX[') and p.endswith(']'):
+                    if p.startswith("$HEX[") and p.endswith("]"):
                         try:
-                            p = bytes.fromhex(p[5:-1]).decode('utf-8', errors='replace')
+                            p = bytes.fromhex(p[5:-1]).decode("utf-8", errors="replace")
                         except ValueError:
                             pass
                     batch.append((h.lower(), p))
 
             if len(batch) >= 100000:
-                c.executemany("INSERT OR IGNORE INTO cracked_hashes (nt_hash, cracked_password) VALUES (?, ?)", batch)
+                c.executemany(
+                    "INSERT OR IGNORE INTO cracked_hashes (nt_hash, cracked_password) VALUES (?, ?)",
+                    batch,
+                )
                 batch = []
 
     if batch:
-        c.executemany("INSERT OR IGNORE INTO cracked_hashes (nt_hash, cracked_password) VALUES (?, ?)", batch)
+        c.executemany(
+            "INSERT OR IGNORE INTO cracked_hashes (nt_hash, cracked_password) VALUES (?, ?)",
+            batch,
+        )
 
     conn.commit()
     conn.close()
 
-def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None, interactive: bool = False):
+
+def parse_ntds(
+    ntds_path: str,
+    db_path: str,
+    mapping_path: Optional[str] = None,
+    interactive: bool = False,
+):
     """Parses NTDS dump, skips krbtgt/machine accounts, inserts directly into DB."""
     logging.info(f"Parsing NTDS file: {ntds_path}")
 
     domain_mapping = {}
     if mapping_path:
         try:
-            with open(mapping_path, 'r', encoding='utf-8') as mf:
+            with open(mapping_path, "r", encoding="utf-8") as mf:
                 domain_mapping = json.load(mf)
             # Ensure all keys and values are strings and values are lists
-            domain_mapping = {str(k): [str(v) for v in vals] for k, vals in domain_mapping.items()}
+            domain_mapping = {
+                str(k): [str(v) for v in vals] for k, vals in domain_mapping.items()
+            }
         except Exception as e:
             logging.error(f"Failed to read domain mapping file: {e}")
             domain_mapping = {}
@@ -173,7 +227,7 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
     c = conn.cursor()
 
     # We use a temporary table to hold all parsed accounts before finalizing mappings
-    c.executescript('''
+    c.executescript("""
         CREATE TEMP TABLE ntds_temp (
             id INTEGER PRIMARY KEY,
             original_domain TEXT,
@@ -183,13 +237,13 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
             nt_hash TEXT,
             is_history BOOLEAN
         );
-    ''')
+    """)
 
     temp_batch = []
     next_user_id = 1
     count = 0
 
-    with open(ntds_path, 'r', encoding='utf-8', errors='replace') as f:
+    with open(ntds_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             count += 1
             if count % 100000 == 0:
@@ -201,13 +255,13 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
 
             # Expected format (e.g. impacket-secretsdump):
             # domain\username:RID:lmhash:nthash:::
-            parts = line.split(':')
+            parts = line.split(":")
             if len(parts) < 4:
                 continue
 
             domain_user = parts[0]
-            if '\\' in domain_user:
-                domain, username = domain_user.split('\\', 1)
+            if "\\" in domain_user:
+                domain, username = domain_user.split("\\", 1)
             else:
                 domain, username = "UNKNOWN", domain_user
 
@@ -221,28 +275,38 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
 
             is_history = False
             base_username = username
-            history_match = re.search(r'_history\d*$', username, re.IGNORECASE)
+            history_match = re.search(r"_history\d*$", username, re.IGNORECASE)
             if history_match:
-                base_username = username[:history_match.start()]
+                base_username = username[: history_match.start()]
                 is_history = True
 
-            if base_username.lower() == 'krbtgt' or base_username.endswith('$'):
+            if base_username.lower() == "krbtgt" or base_username.endswith("$"):
                 continue
 
-            temp_batch.append((next_user_id, domain, base_username, rid, lm_hash, nt_hash, is_history))
+            temp_batch.append(
+                (next_user_id, domain, base_username, rid, lm_hash, nt_hash, is_history)
+            )
             next_user_id += 1
 
             if len(temp_batch) >= 100000:
-                c.executemany("INSERT INTO ntds_temp (id, original_domain, username, rid, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?, ?, ?, ?)", temp_batch)
+                c.executemany(
+                    "INSERT INTO ntds_temp (id, original_domain, username, rid, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    temp_batch,
+                )
                 temp_batch = []
 
     if temp_batch:
-        c.executemany("INSERT INTO ntds_temp (id, original_domain, username, rid, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?, ?, ?, ?)", temp_batch)
+        c.executemany(
+            "INSERT INTO ntds_temp (id, original_domain, username, rid, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            temp_batch,
+        )
 
     conn.commit()
 
     logging.info("Resolving domain mappings...")
-    c.execute("CREATE INDEX idx_ntds_temp_dom_user ON ntds_temp(original_domain, username)")
+    c.execute(
+        "CREATE INDEX idx_ntds_temp_dom_user ON ntds_temp(original_domain, username)"
+    )
 
     # Process unique original_domain/username combinations to determine final domain
     c.execute("SELECT DISTINCT original_domain, username FROM ntds_temp")
@@ -274,7 +338,10 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
                 # Let's see which options ALREADY exist in the NTDS for this exact username
                 found_options = []
                 for opt in options:
-                    c.execute("SELECT 1 FROM ntds_temp WHERE lower(original_domain) = ? AND lower(username) = ? LIMIT 1", (opt.lower(), base_username.lower()))
+                    c.execute(
+                        "SELECT 1 FROM ntds_temp WHERE lower(original_domain) = ? AND lower(username) = ? LIMIT 1",
+                        (opt.lower(), base_username.lower()),
+                    )
                     if c.fetchone():
                         found_options.append(opt)
 
@@ -284,10 +351,14 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
                 if len(remaining_options) == 1:
                     final_domain = remaining_options[0]
                 elif len(remaining_options) == 0:
-                    final_domain = options[0] # Fallback if all options are magically found elsewhere
+                    final_domain = options[
+                        0
+                    ]  # Fallback if all options are magically found elsewhere
                 else:
                     if interactive:
-                        print(f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'.")
+                        print(
+                            f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'."
+                        )
                         print("Options:")
                         for idx, opt in enumerate(remaining_options):
                             print(f"  [{idx + 1}] {opt}")
@@ -311,7 +382,10 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
                         final_domain = remaining_options[0]
 
         # Note: RID is pulled per hash, but in users table it's one per domain\username. We can grab any RID for this user.
-        c.execute("SELECT rid FROM ntds_temp WHERE original_domain = ? AND username = ? LIMIT 1", (orig_domain, base_username))
+        c.execute(
+            "SELECT rid FROM ntds_temp WHERE original_domain = ? AND username = ? LIMIT 1",
+            (orig_domain, base_username),
+        )
         rid_row = c.fetchone()
         rid = rid_row[0] if rid_row else 0
 
@@ -321,21 +395,30 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
         if key not in user_key_to_id:
             user_key_to_id[key] = next_final_id
             # Note: storing orig_domain. If multiple orig_domains map to same final_domain, we just store the first one encountered.
-            users_batch.append((next_final_id, final_domain, base_username, orig_domain, rid))
+            users_batch.append(
+                (next_final_id, final_domain, base_username, orig_domain, rid)
+            )
             next_final_id += 1
 
-        orig_to_final_id[f"{orig_domain}\\{base_username}".lower()] = user_key_to_id[key]
+        orig_to_final_id[f"{orig_domain}\\{base_username}".lower()] = user_key_to_id[
+            key
+        ]
 
     # Insert into real users table
     batch_size = 100000
     for i in range(0, len(users_batch), batch_size):
-        c.executemany("INSERT INTO users (id, domain, username, original_domain, rid) VALUES (?, ?, ?, ?, ?)", users_batch[i:i+batch_size])
+        c.executemany(
+            "INSERT INTO users (id, domain, username, original_domain, rid) VALUES (?, ?, ?, ?, ?)",
+            users_batch[i : i + batch_size],
+        )
 
     # Now we need to map the temp hashes to the final user_ids
     logging.info("Migrating hashes from temp to final tables...")
 
     hashes_batch = []
-    c.execute("SELECT original_domain, username, lm_hash, nt_hash, is_history FROM ntds_temp")
+    c.execute(
+        "SELECT original_domain, username, lm_hash, nt_hash, is_history FROM ntds_temp"
+    )
     for h_row in c.fetchall():
         orig_domain, username, lm_hash, nt_hash, is_history = h_row
         orig_key = f"{orig_domain}\\{username}".lower()
@@ -344,11 +427,17 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
             hashes_batch.append((final_id, lm_hash, nt_hash, is_history))
 
         if len(hashes_batch) >= 100000:
-            c.executemany("INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)", hashes_batch)
+            c.executemany(
+                "INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)",
+                hashes_batch,
+            )
             hashes_batch = []
 
     if hashes_batch:
-        c.executemany("INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)", hashes_batch)
+        c.executemany(
+            "INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)",
+            hashes_batch,
+        )
 
     c.execute("DROP TABLE ntds_temp")
     conn.commit()
@@ -367,40 +456,42 @@ def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None,
     conn.commit()
     conn.close()
 
+
 def _build_identifier_map(bh_files: List[str]) -> Dict[str, str]:
     identifier_map = {}
     for bh_file in bh_files:
-        with open(bh_file, 'r', encoding='utf-8') as f:
+        with open(bh_file, "r", encoding="utf-8") as f:
             try:
                 data = json.load(f)
             except json.JSONDecodeError:
                 continue
 
             data_list = []
-            if 'data' in data:
-                data_list = data['data']
-            elif 'users' in data:
-                data_list = data['users']
-            elif 'groups' in data:
-                data_list = data['groups']
+            if "data" in data:
+                data_list = data["data"]
+            elif "users" in data:
+                data_list = data["users"]
+            elif "groups" in data:
+                data_list = data["groups"]
             else:
                 if isinstance(data, list):
                     data_list = data
 
             for item in data_list:
-                props = item.get('Properties', {})
-                obj_id = item.get('ObjectIdentifier')
-                name = props.get('name')
+                props = item.get("Properties", {})
+                obj_id = item.get("ObjectIdentifier")
+                name = props.get("name")
                 if obj_id and name:
                     identifier_map[obj_id] = name
     return identifier_map
+
 
 def _process_bh_file(args):
     bh_file, global_identifier_map = args
     user_updates = []
     group_inserts = []
 
-    with open(bh_file, 'r', encoding='utf-8') as f:
+    with open(bh_file, "r", encoding="utf-8") as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError:
@@ -408,16 +499,16 @@ def _process_bh_file(args):
             return user_updates, group_inserts
 
         data_list = []
-        if 'data' in data:
-            data_list = data['data']
-        elif 'users' in data:
-            data_list = data['users']
+        if "data" in data:
+            data_list = data["data"]
+        elif "users" in data:
+            data_list = data["users"]
             for item in data_list:
-                item['type'] = 'User'
-        elif 'groups' in data:
-            data_list = data['groups']
+                item["type"] = "User"
+        elif "groups" in data:
+            data_list = data["groups"]
             for item in data_list:
-                item['type'] = 'Group'
+                item["type"] = "Group"
         else:
             if isinstance(data, list):
                 data_list = data
@@ -425,38 +516,50 @@ def _process_bh_file(args):
                 return user_updates, group_inserts
 
         for item in data_list:
-            item_type = item.get('type', item.get('Type', '')).upper()
-            props = item.get('Properties', {})
+            item_type = item.get("type", item.get("Type", "")).upper()
+            props = item.get("Properties", {})
 
-            if item_type == 'USER' or (not item_type and props.get('samaccountname')):
-                domain = props.get('domain', '').split('.')[0]
-                samaccountname = props.get('samaccountname', '')
+            if item_type == "USER" or (not item_type and props.get("samaccountname")):
+                domain = props.get("domain", "").split(".")[0]
+                samaccountname = props.get("samaccountname", "")
                 if samaccountname:
-                    user_updates.append({
-                        'domain': domain.lower(),
-                        'samaccountname': samaccountname.lower(),
-                        'enabled': props.get('enabled', True),
-                        'pwdneverexpires': props.get('pwdneverexpires', False),
-                        'passwordnotreqd': props.get('passwordnotreqd', False),
-                        'kerberoastable': props.get('hasspn', False),
-                        'asreproastable': props.get('dontreqpreauth', False),
-                        'distinguishedname': props.get('distinguishedname', ''),
-                        'pwdlastset': props.get('pwdlastset', 0)
-                    })
+                    user_updates.append(
+                        {
+                            "domain": domain.lower(),
+                            "samaccountname": samaccountname.lower(),
+                            "enabled": props.get("enabled", True),
+                            "pwdneverexpires": props.get("pwdneverexpires", False),
+                            "passwordnotreqd": props.get("passwordnotreqd", False),
+                            "kerberoastable": props.get("hasspn", False),
+                            "asreproastable": props.get("dontreqpreauth", False),
+                            "distinguishedname": props.get("distinguishedname", ""),
+                            "pwdlastset": props.get("pwdlastset", 0),
+                        }
+                    )
 
-            if item_type == 'GROUP' or (not item_type and 'Members' in item):
-                group_name = props.get('name', '').split('@')[0] if props.get('name') else ''
+            if item_type == "GROUP" or (not item_type and "Members" in item):
+                group_name = (
+                    props.get("name", "").split("@")[0] if props.get("name") else ""
+                )
                 if group_name:
-                    for member in item.get('Members', []):
-                        m_type = member.get('ObjectType', member.get('type', '')).upper()
-                        if m_type == 'USER':
-                            m_name = member.get('ObjectName', member.get('name', ''))
-                            if not m_name and member.get('ObjectIdentifier'):
-                                m_name = global_identifier_map.get(member.get('ObjectIdentifier'), '')
+                    for member in item.get("Members", []):
+                        m_type = member.get(
+                            "ObjectType", member.get("type", "")
+                        ).upper()
+                        if m_type == "USER":
+                            m_name = member.get("ObjectName", member.get("name", ""))
+                            if not m_name and member.get("ObjectIdentifier"):
+                                m_name = global_identifier_map.get(
+                                    member.get("ObjectIdentifier"), ""
+                                )
                             if m_name:
-                                m_parts = m_name.split('@')
+                                m_parts = m_name.split("@")
                                 m_user = m_parts[0].lower()
-                                m_dom = m_parts[1].split('.')[0].lower() if len(m_parts) > 1 else ''
+                                m_dom = (
+                                    m_parts[1].split(".")[0].lower()
+                                    if len(m_parts) > 1
+                                    else ""
+                                )
                                 group_inserts.append((m_dom, m_user, group_name))
 
     return user_updates, group_inserts
@@ -505,7 +608,20 @@ def parse_bloodhound(bh_files: List[str], db_path: str):
             CREATE INDEX idx_bh_users_username ON bh_users(username);
         """)
 
-        batch = [(u['domain'], u['samaccountname'], u['enabled'], u['pwdneverexpires'], u['passwordnotreqd'], u['kerberoastable'], u['asreproastable'], u['distinguishedname'], u['pwdlastset']) for u in all_user_updates]
+        batch = [
+            (
+                u["domain"],
+                u["samaccountname"],
+                u["enabled"],
+                u["pwdneverexpires"],
+                u["passwordnotreqd"],
+                u["kerberoastable"],
+                u["asreproastable"],
+                u["distinguishedname"],
+                u["pwdlastset"],
+            )
+            for u in all_user_updates
+        ]
         c.executemany("INSERT INTO bh_users VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", batch)
 
         # Apply strict match (domain + username)
@@ -581,14 +697,15 @@ def parse_bloodhound(bh_files: List[str], db_path: str):
     conn.commit()
     conn.close()
 
+
 def parse_high_value(file_path: Optional[str]) -> List[str]:
     """Returns list of high value groups."""
     if not file_path:
-        return ['Domain Admins', 'Enterprise Admins']
+        return ["Domain Admins", "Enterprise Admins"]
 
     groups = []
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             for line in f:
                 val = line.strip()
                 if val:
@@ -596,18 +713,20 @@ def parse_high_value(file_path: Optional[str]) -> List[str]:
         return groups
     except Exception as e:
         logging.error(f"Failed to read high value file: {e}")
-        return ['Domain Admins', 'Enterprise Admins']
+        return ["Domain Admins", "Enterprise Admins"]
+
 
 def parse_policy(file_path: Optional[str]) -> Dict:
     """Returns policy dict."""
     if not file_path:
         return {}
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         logging.error(f"Failed to read policy file: {e}")
         return {}
+
 
 def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bool):
     logging.info("Calculating policy violations and database setup...")
@@ -649,12 +768,19 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     # Pre-process FGPP policies
     processed_fgpp = []
     for policy_key, g_policy in fgpp_policies.items():
-        processed_fgpp.append({
-            'policy': g_policy,
-            'match_groups': set(g.lower() for g in g_policy.get("match_groups", [])),
-            'match_ous': [ou.lower() for ou in g_policy.get("match_ous", [])],
-            'match_usernames': [re.compile(regex, re.IGNORECASE) for regex in g_policy.get("match_usernames", [])]
-        })
+        processed_fgpp.append(
+            {
+                "policy": g_policy,
+                "match_groups": set(
+                    g.lower() for g in g_policy.get("match_groups", [])
+                ),
+                "match_ous": [ou.lower() for ou in g_policy.get("match_ous", [])],
+                "match_usernames": [
+                    re.compile(regex, re.IGNORECASE)
+                    for regex in g_policy.get("match_usernames", [])
+                ],
+            }
+        )
 
     for row in c.fetchall():
         user_id = row[0]
@@ -669,35 +795,44 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
             matched = False
 
             # Check groups
-            for g in p['match_groups']:
+            for g in p["match_groups"]:
                 if g in user_groups_lower:
                     matched = True
                     break
 
             # Check OUs (both in DN as an OU substring or directly matching a group name)
             if not matched:
-                for ou in p['match_ous']:
+                for ou in p["match_ous"]:
                     if (dn_lower and ou in dn_lower) or (ou in user_groups_lower):
                         matched = True
                         break
 
             # Check usernames
             if not matched and username:
-                for regex in p['match_usernames']:
+                for regex in p["match_usernames"]:
                     if regex.search(username):
                         matched = True
                         break
 
             if matched:
-                matched_policies.append(p['policy'])
+                matched_policies.append(p["policy"])
 
         if matched_policies:
             min_len = max(p.get("length", 0) for p in matched_policies)
             req_complexity = any(p.get("complexity", False) for p in matched_policies)
 
-            max_lifetime = min((p.get("lifetime", 0) for p in matched_policies if p.get("lifetime", 0) > 0), default=0)
+            max_lifetime = min(
+                (
+                    p.get("lifetime", 0)
+                    for p in matched_policies
+                    if p.get("lifetime", 0) > 0
+                ),
+                default=0,
+            )
 
-            policy_name = ", ".join(p.get("name", "Unknown FGPP") for p in matched_policies)
+            policy_name = ", ".join(
+                p.get("name", "Unknown FGPP") for p in matched_policies
+            )
         else:
             min_len = base_policy.get("length", 0)
             req_complexity = base_policy.get("complexity", False)
@@ -735,12 +870,13 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
             violations.append((user_id, policy_name, ", ".join(reasons)))
 
     if violations:
-        c.executemany("INSERT INTO policy_violations (user_id, policy_name, reason) VALUES (?, ?, ?)", violations)
+        c.executemany(
+            "INSERT INTO policy_violations (user_id, policy_name, reason) VALUES (?, ?, ?)",
+            violations,
+        )
         conn.commit()
 
     conn.close()
-
-import os
 
 
 def main():
@@ -758,18 +894,16 @@ def main():
     c = conn.cursor()
     c.execute("SELECT 1 FROM web_users WHERE username = 'Administrator'")
     if not c.fetchone():
-        import sys
-        import getpass
-        import stat
-
         admin_password = None
         is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
 
         if is_interactive:
-            print("\n" + "="*60)
+            print("\n" + "=" * 60)
             print("🔒 SECURITY NOTICE - INITIAL SETUP")
-            print("="*60)
-            print("Please set an initial password for the 'Administrator' web portal account.")
+            print("=" * 60)
+            print(
+                "Please set an initial password for the 'Administrator' web portal account."
+            )
             while True:
                 try:
                     pwd1 = getpass.getpass("Password: ")
@@ -781,43 +915,55 @@ def main():
                         print("Passwords do not match or are empty. Please try again.")
                 except EOFError:
                     break
-            print("="*60 + "\n")
+            print("=" * 60 + "\n")
 
         if not admin_password:
             # Non-interactive fallback or if interactive prompt was aborted
-            admin_password = ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(16))
+            admin_password = "".join(
+                secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()")
+                for _ in range(16)
+            )
             creds_file = "admin_credentials.txt"
 
             # Create file with strict permissions
             # We open with O_CREAT | O_WRONLY | O_TRUNC to ensure we create it
             # and set mode to 0o600
-            fd = os.open(creds_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-            with os.fdopen(fd, 'w') as f:
-                f.write("="*60 + "\n")
+            fd = os.open(
+                creds_file,
+                os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
+                stat.S_IRUSR | stat.S_IWUSR,
+            )
+            with os.fdopen(fd, "w") as f:
+                f.write("=" * 60 + "\n")
                 f.write("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS\n")
-                f.write("="*60 + "\n")
+                f.write("=" * 60 + "\n")
                 f.write(f"Username: Administrator\n")
                 f.write(f"Password: {admin_password}\n")
-                f.write("="*60 + "\n")
-                f.write("Please save these credentials. You will be prompted to change the password upon first login.\n")
-                f.write("="*60 + "\n")
+                f.write("=" * 60 + "\n")
+                f.write(
+                    "Please save these credentials. You will be prompted to change the password upon first login.\n"
+                )
+                f.write("=" * 60 + "\n")
 
-            print("\n" + "="*60)
+            print("\n" + "=" * 60)
             print("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS")
-            print("="*60)
+            print("=" * 60)
             print(f"Running in non-interactive mode.")
-            print(f"Random administrator credentials have been generated and saved securely to: {creds_file}")
+            print(
+                f"Random administrator credentials have been generated and saved securely to: {creds_file}"
+            )
             print("Please check this file for the login credentials.")
-            print("="*60 + "\n")
+            print("=" * 60 + "\n")
 
         admin_hash = generate_password_hash(admin_password)
 
-        c.execute("INSERT INTO web_users (username, password_hash, must_change_password) VALUES (?, ?, ?)",
-                  ('Administrator', admin_hash, 1))
+        c.execute(
+            "INSERT INTO web_users (username, password_hash, must_change_password) VALUES (?, ?, ?)",
+            ("Administrator", admin_hash, 1),
+        )
         conn.commit()
 
     conn.close()
-
 
     parse_potfile(args.potfile, db_path)
     logging.info("Loaded cracked hashes from potfile into DB.")
@@ -830,14 +976,22 @@ def main():
         logging.info("Parsed Bloodhound data into DB.")
 
         if args.enabled_only:
-            logging.info("Applying global --enabled-only filter. Deleting disabled users and associated data from DB.")
+            logging.info(
+                "Applying global --enabled-only filter. Deleting disabled users and associated data from DB."
+            )
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
 
             # Delete from related tables first
-            c.execute("DELETE FROM hashes WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
-            c.execute("DELETE FROM user_groups WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
-            c.execute("DELETE FROM policy_violations WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
+            c.execute(
+                "DELETE FROM hashes WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)"
+            )
+            c.execute(
+                "DELETE FROM user_groups WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)"
+            )
+            c.execute(
+                "DELETE FROM policy_violations WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)"
+            )
 
             # Delete from users table
             c.execute("DELETE FROM users WHERE enabled = 0")
@@ -850,7 +1004,10 @@ def main():
 
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", ("high_value_groups", json.dumps(high_value_groups)))
+    c.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        ("high_value_groups", json.dumps(high_value_groups)),
+    )
     conn.commit()
     conn.close()
 
@@ -879,5 +1036,6 @@ def main():
 
     logging.info("Analysis complete. Database ready for dynamic portal.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
