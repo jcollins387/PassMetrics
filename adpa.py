@@ -776,7 +776,7 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
         with open(mapping_path, "r", encoding="utf-8") as mf:
             domain_mapping = json.load(mf)
         # Ensure all keys and values are strings and values are lists
-        domain_mapping = {str(k): [str(v) for v in vals] for k, vals in domain_mapping.items()}
+        domain_mapping = {str(k).lower(): [str(v) for v in vals] for k, vals in domain_mapping.items()}
     except Exception as e:
         logging.error(f"Failed to read domain mapping file: {e}")
         return
@@ -784,17 +784,17 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
-    c.execute("SELECT DISTINCT domain FROM users")
+    c.execute("SELECT DISTINCT lower(domain) FROM users")
     existing_domains_in_db = {row[0] for row in c.fetchall()}
 
     # We only process users whose current domain is in the mapping keys
-    domains_to_map = [d for d in existing_domains_in_db if d in domain_mapping]
-    if not domains_to_map:
+    domains_to_map_lower = [d for d in existing_domains_in_db if d in domain_mapping]
+    if not domains_to_map_lower:
         conn.close()
         return
 
-    c.execute("SELECT id, domain, username FROM users WHERE domain IN ({seq})".format(
-        seq=','.join(['?']*len(domains_to_map))), domains_to_map)
+    c.execute("SELECT id, domain, username FROM users WHERE lower(domain) IN ({seq})".format(
+        seq=','.join(['?']*len(domains_to_map_lower))), domains_to_map_lower)
     users_to_map = c.fetchall()
 
     # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries during automatic resolution
@@ -804,7 +804,7 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
     updates = []
 
     for user_id, orig_domain, base_username in users_to_map:
-        options = domain_mapping[orig_domain]
+        options = domain_mapping[orig_domain.lower()]
         final_domain = orig_domain
 
         if len(options) == 1:
