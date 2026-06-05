@@ -627,34 +627,33 @@ def parse_bloodhound(bh_files: List[str], db_path: str):
         # Apply strict match (domain + username)
         c.execute("""
             UPDATE users SET
-                enabled = (SELECT enabled FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
-                pwdneverexpires = (SELECT pwdneverexpires FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
-                passwordnotreqd = (SELECT passwordnotreqd FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
-                kerberoastable = (SELECT kerberoastable FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
-                asreproastable = (SELECT asreproastable FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
-                distinguishedname = (SELECT distinguishedname FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)),
-                pwdlastset = (SELECT pwdlastset FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username))
-            WHERE EXISTS (
-                SELECT 1 FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)
-            )
+                enabled = bh_users.enabled,
+                pwdneverexpires = bh_users.pwdneverexpires,
+                passwordnotreqd = bh_users.passwordnotreqd,
+                kerberoastable = bh_users.kerberoastable,
+                asreproastable = bh_users.asreproastable,
+                distinguishedname = bh_users.distinguishedname,
+                pwdlastset = bh_users.pwdlastset
+            FROM bh_users
+            WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)
         """)
 
         # Apply fallback match (username only for users that weren't matched above)
         # This mirrors the fallback_index logic in the original script
         c.execute("""
             UPDATE users SET
-                enabled = (SELECT enabled FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
-                pwdneverexpires = (SELECT pwdneverexpires FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
-                passwordnotreqd = (SELECT passwordnotreqd FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
-                kerberoastable = (SELECT kerberoastable FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
-                asreproastable = (SELECT asreproastable FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
-                distinguishedname = (SELECT distinguishedname FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1),
-                pwdlastset = (SELECT pwdlastset FROM bh_users WHERE bh_users.username = lower(users.username) LIMIT 1)
-            WHERE NOT EXISTS (
-                SELECT 1 FROM bh_users WHERE bh_users.domain = lower(users.domain) AND bh_users.username = lower(users.username)
-            ) AND EXISTS (
-                SELECT 1 FROM bh_users WHERE bh_users.username = lower(users.username)
-            )
+                enabled = bh_users.enabled,
+                pwdneverexpires = bh_users.pwdneverexpires,
+                passwordnotreqd = bh_users.passwordnotreqd,
+                kerberoastable = bh_users.kerberoastable,
+                asreproastable = bh_users.asreproastable,
+                distinguishedname = bh_users.distinguishedname,
+                pwdlastset = bh_users.pwdlastset
+            FROM bh_users
+            WHERE bh_users.username = lower(users.username)
+              AND NOT EXISTS (
+                  SELECT 1 FROM bh_users bh2 WHERE bh2.domain = lower(users.domain) AND bh2.username = lower(users.username)
+              )
         """)
 
         c.execute("DROP TABLE bh_users")
