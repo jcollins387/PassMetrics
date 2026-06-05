@@ -89,8 +89,17 @@ def init_db(db_path: str):
 
 
 def parse_args():
+    description = (
+        "Analyze NTDS hashes against a potfile and optional Bloodhound data.\n\n"
+        "Administrator Credentials:\n"
+        "  On first run, the tool creates an 'Administrator' account for the web portal.\n"
+        "  If running interactively, you will be prompted to set the password.\n"
+        "  If running non-interactively, a secure random password is generated and saved\n"
+        "  to 'admin_credentials.txt' with strict permissions."
+    )
     parser = argparse.ArgumentParser(
-        description="Analyze NTDS hashes against a potfile and optional Bloodhound data.",
+        description=description,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False
     )
 
@@ -749,21 +758,63 @@ def main():
     c = conn.cursor()
     c.execute("SELECT 1 FROM web_users WHERE username = 'Administrator'")
     if not c.fetchone():
-        admin_password = ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(16))
+        import sys
+        import getpass
+        import stat
+
+        admin_password = None
+        is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+        if is_interactive:
+            print("\n" + "="*60)
+            print("🔒 SECURITY NOTICE - INITIAL SETUP")
+            print("="*60)
+            print("Please set an initial password for the 'Administrator' web portal account.")
+            while True:
+                try:
+                    pwd1 = getpass.getpass("Password: ")
+                    pwd2 = getpass.getpass("Confirm Password: ")
+                    if pwd1 == pwd2 and len(pwd1) > 0:
+                        admin_password = pwd1
+                        break
+                    else:
+                        print("Passwords do not match or are empty. Please try again.")
+                except EOFError:
+                    break
+            print("="*60 + "\n")
+
+        if not admin_password:
+            # Non-interactive fallback or if interactive prompt was aborted
+            admin_password = ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(16))
+            creds_file = "admin_credentials.txt"
+
+            # Create file with strict permissions
+            # We open with O_CREAT | O_WRONLY | O_TRUNC to ensure we create it
+            # and set mode to 0o600
+            fd = os.open(creds_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+            with os.fdopen(fd, 'w') as f:
+                f.write("="*60 + "\n")
+                f.write("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS\n")
+                f.write("="*60 + "\n")
+                f.write(f"Username: Administrator\n")
+                f.write(f"Password: {admin_password}\n")
+                f.write("="*60 + "\n")
+                f.write("Please save these credentials. You will be prompted to change the password upon first login.\n")
+                f.write("="*60 + "\n")
+
+            print("\n" + "="*60)
+            print("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS")
+            print("="*60)
+            print(f"Running in non-interactive mode.")
+            print(f"Random administrator credentials have been generated and saved securely to: {creds_file}")
+            print("Please check this file for the login credentials.")
+            print("="*60 + "\n")
+
         admin_hash = generate_password_hash(admin_password)
 
         c.execute("INSERT INTO web_users (username, password_hash, must_change_password) VALUES (?, ?, ?)",
                   ('Administrator', admin_hash, 1))
         conn.commit()
-
-        print("\n" + "="*60)
-        print("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS")
-        print("="*60)
-        print(f"Username: Administrator")
-        print(f"Password: {admin_password}")
-        print("="*60)
-        print("Please save these credentials. You will be prompted to change the password upon first login.")
-        print("="*60 + "\n")
 
     conn.close()
 
