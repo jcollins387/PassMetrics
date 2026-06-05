@@ -9,15 +9,10 @@ from werkzeug.security import check_password_hash, generate_password_hash
 app = Flask(__name__)
 
 def get_secret_key():
-    secret_file = '.flask_secret'
-    if os.path.exists(secret_file):
-        with open(secret_file, 'rb') as f:
-            return f.read()
-    else:
-        key = os.urandom(24)
-        with open(secret_file, 'wb') as f:
-            f.write(key)
-        return key
+    env_key = os.environ.get('FLASK_SECRET_KEY')
+    if env_key:
+        return env_key.encode('utf-8')
+    return os.urandom(24)
 
 app.secret_key = get_secret_key()
 DATABASE = 'analysis.db'
@@ -25,7 +20,8 @@ DATABASE = 'analysis.db'
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
-        db = g._database = sqlite3.connect(DATABASE)
+        db_path = app.config.get('DATABASE', DATABASE)
+        db = g._database = sqlite3.connect(db_path)
         db.row_factory = sqlite3.Row
     return db
 
