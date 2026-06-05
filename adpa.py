@@ -5,6 +5,9 @@ import sqlite3
 import time
 import re
 import concurrent.futures
+import secrets
+import string
+from werkzeug.security import generate_password_hash
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set
 
@@ -64,6 +67,12 @@ def init_db(db_path: str):
             cracked_password TEXT,
             count INTEGER,
             shared_by TEXT
+        );
+        CREATE TABLE IF NOT EXISTS web_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            must_change_password BOOLEAN DEFAULT 1
         );
 
         CREATE INDEX IF NOT EXISTS idx_users_domain_username ON users(domain, username);
@@ -734,6 +743,30 @@ def main():
         os.remove(db_path)
 
     init_db(db_path)
+
+    # Generate and insert admin credentials if not already present
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM web_users WHERE username = 'Administrator'")
+    if not c.fetchone():
+        admin_password = ''.join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(16))
+        admin_hash = generate_password_hash(admin_password)
+
+        c.execute("INSERT INTO web_users (username, password_hash, must_change_password) VALUES (?, ?, ?)",
+                  ('Administrator', admin_hash, 1))
+        conn.commit()
+
+        print("\n" + "="*60)
+        print("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS")
+        print("="*60)
+        print(f"Username: Administrator")
+        print(f"Password: {admin_password}")
+        print("="*60)
+        print("Please save these credentials. You will be prompted to change the password upon first login.")
+        print("="*60 + "\n")
+
+    conn.close()
+
 
     parse_potfile(args.potfile, db_path)
     logging.info("Loaded cracked hashes from potfile into DB.")
