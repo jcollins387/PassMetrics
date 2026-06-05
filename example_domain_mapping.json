@@ -1,0 +1,11 @@
+{
+  "bigexample.net": [
+    "domain.local",
+    "short.domain.local"
+  ],
+  "smallexample.net": [
+    "domain.local",
+    "short.domain.local",
+    "external.domain.local"
+  ]
+}
