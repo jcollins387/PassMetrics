@@ -107,9 +107,7 @@ def parse_args():
     )
 
     required = parser.add_argument_group("Required Arguments")
-    required.add_argument(
-        "-n", "--ntds", required=True, help="NTDS file containing password hashes"
-    )
+    required.add_argument("-n", "--ntds", required=True, help="NTDS file containing password hashes")
     required.add_argument(
         "-p",
         "--potfile",
@@ -216,9 +214,7 @@ def parse_ntds(
             with open(mapping_path, "r", encoding="utf-8") as mf:
                 domain_mapping = json.load(mf)
             # Ensure all keys and values are strings and values are lists
-            domain_mapping = {
-                str(k): [str(v) for v in vals] for k, vals in domain_mapping.items()
-            }
+            domain_mapping = {str(k): [str(v) for v in vals] for k, vals in domain_mapping.items()}
         except Exception as e:
             logging.error(f"Failed to read domain mapping file: {e}")
             domain_mapping = {}
@@ -283,9 +279,7 @@ def parse_ntds(
             if base_username.lower() == "krbtgt" or base_username.endswith("$"):
                 continue
 
-            temp_batch.append(
-                (next_user_id, domain, base_username, rid, lm_hash, nt_hash, is_history)
-            )
+            temp_batch.append((next_user_id, domain, base_username, rid, lm_hash, nt_hash, is_history))
             next_user_id += 1
 
             if len(temp_batch) >= 100000:
@@ -304,13 +298,14 @@ def parse_ntds(
     conn.commit()
 
     logging.info("Resolving domain mappings...")
-    c.execute(
-        "CREATE INDEX idx_ntds_temp_dom_user ON ntds_temp(original_domain, username)"
-    )
+    c.execute("CREATE INDEX idx_ntds_temp_dom_user ON ntds_temp(original_domain, username)")
 
     # Process unique original_domain/username combinations to determine final domain
     c.execute("SELECT DISTINCT original_domain, username FROM ntds_temp")
     unique_users = c.fetchall()
+
+    # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries during automatic resolution
+    existing_ntds_combos = {(r[0].lower(), r[1].lower()) for r in unique_users}
 
     users_batch = []
     user_key_to_id = {}
@@ -338,11 +333,7 @@ def parse_ntds(
                 # Let's see which options ALREADY exist in the NTDS for this exact username
                 found_options = []
                 for opt in options:
-                    c.execute(
-                        "SELECT 1 FROM ntds_temp WHERE lower(original_domain) = ? AND lower(username) = ? LIMIT 1",
-                        (opt.lower(), base_username.lower()),
-                    )
-                    if c.fetchone():
+                    if (opt.lower(), base_username.lower()) in existing_ntds_combos:
                         found_options.append(opt)
 
                 # Options that are NOT found in the NTDS for this username are the remaining candidates
@@ -351,14 +342,10 @@ def parse_ntds(
                 if len(remaining_options) == 1:
                     final_domain = remaining_options[0]
                 elif len(remaining_options) == 0:
-                    final_domain = options[
-                        0
-                    ]  # Fallback if all options are magically found elsewhere
+                    final_domain = options[0]  # Fallback if all options are magically found elsewhere
                 else:
                     if interactive:
-                        print(
-                            f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'."
-                        )
+                        print(f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'.")
                         print("Options:")
                         for idx, opt in enumerate(remaining_options):
                             print(f"  [{idx + 1}] {opt}")
@@ -395,14 +382,10 @@ def parse_ntds(
         if key not in user_key_to_id:
             user_key_to_id[key] = next_final_id
             # Note: storing orig_domain. If multiple orig_domains map to same final_domain, we just store the first one encountered.
-            users_batch.append(
-                (next_final_id, final_domain, base_username, orig_domain, rid)
-            )
+            users_batch.append((next_final_id, final_domain, base_username, orig_domain, rid))
             next_final_id += 1
 
-        orig_to_final_id[f"{orig_domain}\\{base_username}".lower()] = user_key_to_id[
-            key
-        ]
+        orig_to_final_id[f"{orig_domain}\\{base_username}".lower()] = user_key_to_id[key]
 
     # Insert into real users table
     batch_size = 100000
@@ -416,9 +399,7 @@ def parse_ntds(
     logging.info("Migrating hashes from temp to final tables...")
 
     hashes_batch = []
-    c.execute(
-        "SELECT original_domain, username, lm_hash, nt_hash, is_history FROM ntds_temp"
-    )
+    c.execute("SELECT original_domain, username, lm_hash, nt_hash, is_history FROM ntds_temp")
     for h_row in c.fetchall():
         orig_domain, username, lm_hash, nt_hash, is_history = h_row
         orig_key = f"{orig_domain}\\{username}".lower()
@@ -538,28 +519,18 @@ def _process_bh_file(args):
                     )
 
             if item_type == "GROUP" or (not item_type and "Members" in item):
-                group_name = (
-                    props.get("name", "").split("@")[0] if props.get("name") else ""
-                )
+                group_name = props.get("name", "").split("@")[0] if props.get("name") else ""
                 if group_name:
                     for member in item.get("Members", []):
-                        m_type = member.get(
-                            "ObjectType", member.get("type", "")
-                        ).upper()
+                        m_type = member.get("ObjectType", member.get("type", "")).upper()
                         if m_type == "USER":
                             m_name = member.get("ObjectName", member.get("name", ""))
                             if not m_name and member.get("ObjectIdentifier"):
-                                m_name = global_identifier_map.get(
-                                    member.get("ObjectIdentifier"), ""
-                                )
+                                m_name = global_identifier_map.get(member.get("ObjectIdentifier"), "")
                             if m_name:
                                 m_parts = m_name.split("@")
                                 m_user = m_parts[0].lower()
-                                m_dom = (
-                                    m_parts[1].split(".")[0].lower()
-                                    if len(m_parts) > 1
-                                    else ""
-                                )
+                                m_dom = m_parts[1].split(".")[0].lower() if len(m_parts) > 1 else ""
                                 group_inserts.append((m_dom, m_user, group_name))
 
     return user_updates, group_inserts
@@ -770,14 +741,9 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
         processed_fgpp.append(
             {
                 "policy": g_policy,
-                "match_groups": set(
-                    g.lower() for g in g_policy.get("match_groups", [])
-                ),
+                "match_groups": set(g.lower() for g in g_policy.get("match_groups", [])),
                 "match_ous": [ou.lower() for ou in g_policy.get("match_ous", [])],
-                "match_usernames": [
-                    re.compile(regex, re.IGNORECASE)
-                    for regex in g_policy.get("match_usernames", [])
-                ],
+                "match_usernames": [re.compile(regex, re.IGNORECASE) for regex in g_policy.get("match_usernames", [])],
             }
         )
 
@@ -821,17 +787,11 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
             req_complexity = any(p.get("complexity", False) for p in matched_policies)
 
             max_lifetime = min(
-                (
-                    p.get("lifetime", 0)
-                    for p in matched_policies
-                    if p.get("lifetime", 0) > 0
-                ),
+                (p.get("lifetime", 0) for p in matched_policies if p.get("lifetime", 0) > 0),
                 default=0,
             )
 
-            policy_name = ", ".join(
-                p.get("name", "Unknown FGPP") for p in matched_policies
-            )
+            policy_name = ", ".join(p.get("name", "Unknown FGPP") for p in matched_policies)
         else:
             min_len = base_policy.get("length", 0)
             req_complexity = base_policy.get("complexity", False)
@@ -900,9 +860,7 @@ def main():
             print("\n" + "=" * 60)
             print("🔒 SECURITY NOTICE - INITIAL SETUP")
             print("=" * 60)
-            print(
-                "Please set an initial password for the 'Administrator' web portal account."
-            )
+            print("Please set an initial password for the 'Administrator' web portal account.")
             while True:
                 try:
                     pwd1 = getpass.getpass("Password: ")
@@ -918,10 +876,7 @@ def main():
 
         if not admin_password:
             # Non-interactive fallback or if interactive prompt was aborted
-            admin_password = "".join(
-                secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()")
-                for _ in range(16)
-            )
+            admin_password = "".join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(16))
             creds_file = "admin_credentials.txt"
 
             # Create file with strict permissions
@@ -936,21 +891,17 @@ def main():
                 f.write("=" * 60 + "\n")
                 f.write("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS\n")
                 f.write("=" * 60 + "\n")
-                f.write(f"Username: Administrator\n")
+                f.write("Username: Administrator\n")
                 f.write(f"Password: {admin_password}\n")
                 f.write("=" * 60 + "\n")
-                f.write(
-                    "Please save these credentials. You will be prompted to change the password upon first login.\n"
-                )
+                f.write("Please save these credentials. You will be prompted to change the password upon first login.\n")
                 f.write("=" * 60 + "\n")
 
             print("\n" + "=" * 60)
             print("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS")
             print("=" * 60)
-            print(f"Running in non-interactive mode.")
-            print(
-                f"Random administrator credentials have been generated and saved securely to: {creds_file}"
-            )
+            print("Running in non-interactive mode.")
+            print(f"Random administrator credentials have been generated and saved securely to: {creds_file}")
             print("Please check this file for the login credentials.")
             print("=" * 60 + "\n")
 
@@ -975,22 +926,14 @@ def main():
         logging.info("Parsed Bloodhound data into DB.")
 
         if args.enabled_only:
-            logging.info(
-                "Applying global --enabled-only filter. Deleting disabled users and associated data from DB."
-            )
+            logging.info("Applying global --enabled-only filter. Deleting disabled users and associated data from DB.")
             conn = sqlite3.connect(db_path)
             c = conn.cursor()
 
             # Delete from related tables first
-            c.execute(
-                "DELETE FROM hashes WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)"
-            )
-            c.execute(
-                "DELETE FROM user_groups WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)"
-            )
-            c.execute(
-                "DELETE FROM policy_violations WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)"
-            )
+            c.execute("DELETE FROM hashes WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
+            c.execute("DELETE FROM user_groups WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
+            c.execute("DELETE FROM policy_violations WHERE user_id IN (SELECT id FROM users WHERE enabled = 0)")
 
             # Delete from users table
             c.execute("DELETE FROM users WHERE enabled = 0")
