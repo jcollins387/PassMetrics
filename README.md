@@ -79,6 +79,11 @@ Sometimes the domain names in the NTDS dump differ from the domain names found i
 After `adpa.py` finishes, it will generate an SQLite database named `analysis.db`.
 You can view the interactive reports using the Flask web portal.
 
+**Administrator Credentials:**
+On the first run, `adpa.py` will create an `Administrator` account for the web portal.
+* If run interactively, it will prompt you to set the initial password.
+* If run non-interactively, a secure random password will be generated and saved to `admin_credentials.txt` with strict (`0o600`) permissions.
+
 Start the web server:
 ```bash
 python app.py
