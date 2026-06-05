@@ -639,23 +639,30 @@ def mappings():
     offset = (page - 1) * per_page
     search = request.args.get('search', '')
 
-    query_params = []
-    where_clause = ""
     if search:
-        where_clause = "WHERE u.original_domain LIKE ? OR u.domain LIKE ? OR u.username LIKE ?"
-        query_params.extend(['%' + search + '%', '%' + search + '%', '%' + search + '%'])
+        search_term = f"%{search}%"
+        query_params = [search_term, search_term, search_term]
 
-    # Get total count for pagination
-    c.execute(f"SELECT COUNT(*) FROM users u {where_clause}", query_params)
-    total_users = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM users u WHERE u.original_domain LIKE ? OR u.domain LIKE ? OR u.username LIKE ?", query_params)
+        total_users = c.fetchone()[0]
 
-    c.execute(f"""
-        SELECT u.id, u.domain, u.username, u.original_domain
-        FROM users u
-        {where_clause}
-        ORDER BY u.original_domain, u.username
-        LIMIT ? OFFSET ?
-    """, query_params + [per_page, offset])
+        c.execute("""
+            SELECT u.id, u.domain, u.username, u.original_domain
+            FROM users u
+            WHERE u.original_domain LIKE ? OR u.domain LIKE ? OR u.username LIKE ?
+            ORDER BY u.original_domain, u.username
+            LIMIT ? OFFSET ?
+        """, query_params + [per_page, offset])
+    else:
+        c.execute("SELECT COUNT(*) FROM users u")
+        total_users = c.fetchone()[0]
+
+        c.execute("""
+            SELECT u.id, u.domain, u.username, u.original_domain
+            FROM users u
+            ORDER BY u.original_domain, u.username
+            LIMIT ? OFFSET ?
+        """, [per_page, offset])
     mapping_data = c.fetchall()
 
     return render_template('mappings.html', users=mapping_data, page=page, per_page=per_page, search=search, total_users=total_users)
@@ -683,14 +690,14 @@ def history():
     max_history = 0
 
     if users:
-        user_ids = [str(u['id']) for u in users]
-        placeholders = ','.join(user_ids)
+        user_ids = [u['id'] for u in users]
+        placeholders = ','.join(['?'] * len(user_ids))
         c.execute(f"""
             SELECT user_id, is_history, cracked_password, id as hash_id
             FROM hashes
             WHERE user_id IN ({placeholders})
             ORDER BY user_id, hash_id ASC
-        """)
+        """, user_ids)
         hashes = c.fetchall()
 
         user_dict = {u['id']: {'domain': u['domain'], 'username': u['username'], 'current': '', 'history': []} for u in users}
