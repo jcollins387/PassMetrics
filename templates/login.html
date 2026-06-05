@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Login - Password Analysis Report</title>
+<style>
+    body { font-family: Arial, sans-serif; background: #121212; color: #e0e0e0; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    .login-container { background: #1e1e1e; padding: 40px; border-radius: 5px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); width: 100%; max-width: 400px; }
+    h2 { color: #ffffff; text-align: center; margin-top: 0; }
+    .form-group { margin-bottom: 20px; }
+    label { display: block; margin-bottom: 8px; color: #b0b0b0; }
+    input[type="text"], input[type="password"] { width: 100%; padding: 10px; background: #2c2c2c; border: 1px solid #444; color: #fff; border-radius: 3px; box-sizing: border-box; }
+    input[type="text"]:focus, input[type="password"]:focus { outline: none; border-color: #4dabf7; }
+    button { width: 100%; padding: 12px; background: #4dabf7; color: #121212; border: none; font-weight: bold; font-size: 16px; border-radius: 3px; cursor: pointer; }
+    button:hover { background: #3b8cd9; }
+    .flash-messages { margin-bottom: 20px; }
+    .flash { background: #d9534f; color: white; padding: 10px; border-radius: 3px; text-align: center; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+<div class="login-container">
+    <h2>Secure Login</h2>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="flash-messages">
+          {% for message in messages %}
+            <div class="flash">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <form method="POST" action="/login">
+        <div class="form-group">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required autofocus>
+        </div>
+        <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required>
+        </div>
+        <button type="submit">Login</button>
+    </form>
+</div>
+
+</body>
+</html>

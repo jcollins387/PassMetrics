@@ -2,9 +2,24 @@ import sqlite3
 import io
 import csv
 import json
-from flask import Flask, render_template, request, g, Response
+import os
+from flask import Flask, render_template, request, g, Response, session, redirect, url_for, flash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
+
+def get_secret_key():
+    secret_file = '.flask_secret'
+    if os.path.exists(secret_file):
+        with open(secret_file, 'rb') as f:
+            return f.read()
+    else:
+        key = os.urandom(24)
+        with open(secret_file, 'wb') as f:
+            f.write(key)
+        return key
+
+app.secret_key = get_secret_key()
 DATABASE = 'analysis.db'
 
 def get_db():
@@ -25,6 +40,76 @@ def query_db(query, args=(), one=False):
     rv = cur.fetchall()
     cur.close()
     return (rv[0] if rv else None) if one else rv
+
+@app.before_request
+def require_login():
+    allowed_routes = ['login', 'static']
+    if request.endpoint not in allowed_routes:
+        if 'user_id' not in session:
+            return redirect(url_for('login', next=request.url))
+
+        # Check if user needs to change password
+        if request.endpoint not in ['change_password', 'logout']:
+            user_id = session.get('user_id')
+            user = query_db('SELECT must_change_password FROM web_users WHERE id = ?', [user_id], one=True)
+            if user and user['must_change_password'] == 1:
+                return redirect(url_for('change_password'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+
+        user = query_db('SELECT * FROM web_users WHERE username = ?', [username], one=True)
+
+        if user and check_password_hash(user['password_hash'], password):
+            session['user_id'] = user['id']
+            session['username'] = user['username']
+
+            next_url = request.args.get('next')
+            if user['must_change_password'] == 1:
+                return redirect(url_for('change_password'))
+            return redirect(next_url or url_for('dashboard'))
+        else:
+            flash('Invalid username or password')
+
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/change_password', methods=['GET', 'POST'])
+def change_password():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+
+    if request.method == 'POST':
+        current_password = request.form['current_password']
+        new_password = request.form['new_password']
+        confirm_password = request.form['confirm_password']
+
+        user_id = session['user_id']
+        user = query_db('SELECT * FROM web_users WHERE id = ?', [user_id], one=True)
+
+        if not check_password_hash(user['password_hash'], current_password):
+            flash('Incorrect current password')
+        elif new_password != confirm_password:
+            flash('New passwords do not match')
+        elif len(new_password) < 8:
+            flash('Password must be at least 8 characters long')
+        else:
+            new_hash = generate_password_hash(new_password)
+            db = get_db()
+            db.execute('UPDATE web_users SET password_hash = ?, must_change_password = 0 WHERE id = ?', [new_hash, user_id])
+            db.commit()
+            flash('Password changed successfully')
+            return redirect(url_for('dashboard'))
+
+    return render_template('change_password.html')
+
 
 @app.route('/')
 def dashboard():
