@@ -139,3 +139,23 @@ def test_history_injection(client):
     assert response.status_code == 200
     assert b'historypass' in response.data
     assert b'otherhistorypass' in response.data
+
+def test_get_secret_key_from_env():
+    from app import get_secret_key
+    import os
+    os.environ['FLASK_SECRET_KEY'] = 'test_env_key'
+    key = get_secret_key()
+    assert key == b'test_env_key'
+    del os.environ['FLASK_SECRET_KEY']
+
+def test_get_secret_key_random_fallback():
+    from app import get_secret_key
+    import os
+    if 'FLASK_SECRET_KEY' in os.environ:
+        del os.environ['FLASK_SECRET_KEY']
+    key1 = get_secret_key()
+    key2 = get_secret_key()
+    assert len(key1) == 24
+    assert len(key2) == 24
+    assert key1 != key2 # random keys should be different
+    assert not os.path.exists('.flask_secret') # should not create file
