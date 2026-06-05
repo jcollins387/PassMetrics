@@ -101,7 +101,9 @@ OTHER\\user3:1004:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c08
     # user1 exists as 'corp.short.local\user1', so 'SHORT\user1' should map to 'short.local\user1' due to elimination.
     # user2 has no other mapping found, so 'SHORT\user2' will default to 'short.local' (the first remaining option).
     # user3 'OTHER\user3' has no mappings found, so defaults to 'other.local'.
-    parse_ntds("test_mapping_ntds.txt", DB_PATH, mapping_path="test_mapping.json", interactive=False)
+    from adpa import apply_domain_mapping
+    parse_ntds("test_mapping_ntds.txt", DB_PATH)
+    apply_domain_mapping(DB_PATH, mapping_path="test_mapping.json", interactive=False)
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()

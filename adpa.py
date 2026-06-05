@@ -199,25 +199,9 @@ def parse_potfile(potfile_path: str, db_path: str):
     conn.close()
 
 
-def parse_ntds(
-    ntds_path: str,
-    db_path: str,
-    mapping_path: Optional[str] = None,
-    interactive: bool = False,
-):
+def parse_ntds(ntds_path: str, db_path: str):
     """Parses NTDS dump, skips krbtgt/machine accounts, inserts directly into DB."""
     logging.info(f"Parsing NTDS file: {ntds_path}")
-
-    domain_mapping = {}
-    if mapping_path:
-        try:
-            with open(mapping_path, "r", encoding="utf-8") as mf:
-                domain_mapping = json.load(mf)
-            # Ensure all keys and values are strings and values are lists
-            domain_mapping = {str(k): [str(v) for v in vals] for k, vals in domain_mapping.items()}
-        except Exception as e:
-            logging.error(f"Failed to read domain mapping file: {e}")
-            domain_mapping = {}
 
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -304,71 +288,16 @@ def parse_ntds(
     c.execute("SELECT DISTINCT original_domain, username FROM ntds_temp")
     unique_users = c.fetchall()
 
-    # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries during automatic resolution
-    existing_ntds_combos = {(r[0].lower(), r[1].lower()) for r in unique_users}
-
     users_batch = []
     user_key_to_id = {}
     next_final_id = 1
-
     orig_to_final_id = {}
 
     for row in unique_users:
         orig_domain = row[0]
         base_username = row[1]
+        final_domain = orig_domain # Domain is original domain initially
 
-        final_domain = orig_domain
-
-        # Check mapping
-        if orig_domain in domain_mapping:
-            options = domain_mapping[orig_domain]
-            if len(options) == 1:
-                final_domain = options[0]
-            elif len(options) > 1:
-                # Automatic resolution: keep options that exist as literal original_domains in NTDS
-                # Wait, the user said: "if user provided a json file that maps short to short.domain and corp.short.domain
-                # we should look for ntds hashes that match short.domain/user1 and corp.short.domain/user1.
-                # If corp.short.domain/user1 is found, short/user1 should automatically match to short.domain/user1"
-
-                # Let's see which options ALREADY exist in the NTDS for this exact username
-                found_options = []
-                for opt in options:
-                    if (opt.lower(), base_username.lower()) in existing_ntds_combos:
-                        found_options.append(opt)
-
-                # Options that are NOT found in the NTDS for this username are the remaining candidates
-                remaining_options = [opt for opt in options if opt not in found_options]
-
-                if len(remaining_options) == 1:
-                    final_domain = remaining_options[0]
-                elif len(remaining_options) == 0:
-                    final_domain = options[0]  # Fallback if all options are magically found elsewhere
-                else:
-                    if interactive:
-                        print(f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'.")
-                        print("Options:")
-                        for idx, opt in enumerate(remaining_options):
-                            print(f"  [{idx + 1}] {opt}")
-                        print(f"  [Enter] Default to: {remaining_options[0]}")
-
-                        while True:
-                            choice = input("Select an option (number): ").strip()
-                            if choice == "":
-                                final_domain = remaining_options[0]
-                                break
-                            try:
-                                choice_idx = int(choice) - 1
-                                if 0 <= choice_idx < len(remaining_options):
-                                    final_domain = remaining_options[choice_idx]
-                                    break
-                                else:
-                                    print("Invalid choice.")
-                            except ValueError:
-                                print("Please enter a number.")
-                    else:
-                        final_domain = remaining_options[0]
-
-        # Note: RID is pulled per hash, but in users table it's one per domain\username. We can grab any RID for this user.
         c.execute(
             "SELECT rid FROM ntds_temp WHERE original_domain = ? AND username = ? LIMIT 1",
             (orig_domain, base_username),
@@ -376,12 +305,9 @@ def parse_ntds(
         rid_row = c.fetchone()
         rid = rid_row[0] if rid_row else 0
 
-        # We might have collisions if two original domains map to the same final domain with the same username.
-        # We merge them by using a composite key
         key = f"{final_domain}\\{base_username}".lower()
         if key not in user_key_to_id:
             user_key_to_id[key] = next_final_id
-            # Note: storing orig_domain. If multiple orig_domains map to same final_domain, we just store the first one encountered.
             users_batch.append((next_final_id, final_domain, base_username, orig_domain, rid))
             next_final_id += 1
 
@@ -838,7 +764,137 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     conn.close()
 
 
+
+def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool):
+    if not mapping_path:
+        return
+
+    logging.info("Applying domain mappings...")
+
+    domain_mapping = {}
+    try:
+        with open(mapping_path, "r", encoding="utf-8") as mf:
+            domain_mapping = json.load(mf)
+        # Ensure all keys and values are strings and values are lists
+        domain_mapping = {str(k): [str(v) for v in vals] for k, vals in domain_mapping.items()}
+    except Exception as e:
+        logging.error(f"Failed to read domain mapping file: {e}")
+        return
+
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    c.execute("SELECT DISTINCT domain FROM users")
+    existing_domains_in_db = {row[0] for row in c.fetchall()}
+
+    # We only process users whose current domain is in the mapping keys
+    domains_to_map = [d for d in existing_domains_in_db if d in domain_mapping]
+    if not domains_to_map:
+        conn.close()
+        return
+
+    c.execute("SELECT id, domain, username FROM users WHERE domain IN ({seq})".format(
+        seq=','.join(['?']*len(domains_to_map))), domains_to_map)
+    users_to_map = c.fetchall()
+
+    # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries during automatic resolution
+    c.execute("SELECT DISTINCT domain, username FROM users")
+    existing_ntds_combos = {(r[0].lower(), r[1].lower()) for r in c.fetchall()}
+
+    updates = []
+
+    for user_id, orig_domain, base_username in users_to_map:
+        options = domain_mapping[orig_domain]
+        final_domain = orig_domain
+
+        if len(options) == 1:
+            final_domain = options[0]
+        elif len(options) > 1:
+            found_options = []
+            for opt in options:
+                if (opt.lower(), base_username.lower()) in existing_ntds_combos:
+                    found_options.append(opt)
+
+            if len(found_options) == 1:
+                # If exactly one option exists, select the other one that does NOT exist
+                # Wait, rule: "If one of these exists, the other should be selected."
+                # If short\user exists and option1\user exists but option2\user doesn't, pick option2
+                other_options = [opt for opt in options if opt.lower() != found_options[0].lower()]
+                if other_options:
+                    final_domain = other_options[0]
+                else:
+                    final_domain = found_options[0]
+            elif len(found_options) == 0:
+                # If neither exist, pick the first option
+                final_domain = options[0]
+            else:
+                # If multiple exist (or all exist), leave as short domain (orig_domain)
+                final_domain = orig_domain
+
+            # In cases 3 and 4 (neither exist or both exist), user can override in interactive mode
+            if interactive and (len(found_options) == 0 or len(found_options) > 1):
+                print(f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'.")
+                print("Options:")
+                for idx, opt in enumerate(options):
+                    print(f"  [{idx + 1}] {opt}")
+
+                default_opt = options[0] if len(found_options) == 0 else orig_domain
+                print(f"  [Enter] Default to: {default_opt}")
+
+                while True:
+                    choice = input("Select an option (number) or press Enter for default: ").strip()
+                    if choice == "":
+                        final_domain = default_opt
+                        break
+                    try:
+                        choice_idx = int(choice) - 1
+                        if 0 <= choice_idx < len(options):
+                            final_domain = options[choice_idx]
+                            break
+                        else:
+                            print("Invalid choice.")
+                    except ValueError:
+                        print("Please enter a number.")
+
+        if final_domain != orig_domain:
+            # Check for collision
+            if (final_domain.lower(), base_username.lower()) in existing_ntds_combos:
+                if interactive:
+                    print(f"\nCollision detected: User '{final_domain}\\{base_username}' already exists.")
+                    print(f"Cannot rename '{orig_domain}\\{base_username}' to '{final_domain}'.")
+                    print("Options: [1] Skip rename  [2] Enter a different domain name")
+                    while True:
+                        col_choice = input("Select an option (1 or 2): ").strip()
+                        if col_choice == '1':
+                            final_domain = orig_domain # Skip
+                            break
+                        elif col_choice == '2':
+                            new_dom = input("Enter new domain name: ").strip()
+                            if new_dom:
+                                final_domain = new_dom
+                                break
+                        else:
+                            print("Invalid choice.")
+                else:
+                    logging.warning(f"Collision detected: Cannot rename '{orig_domain}\\{base_username}' to '{final_domain}' because it already exists. Skipping rename.")
+                    final_domain = orig_domain
+
+        if final_domain != orig_domain:
+            updates.append((final_domain, user_id))
+            # Update our tracker so we don't cause collisions within the same batch
+            existing_ntds_combos.add((final_domain.lower(), base_username.lower()))
+
+    if updates:
+        # We process in batches
+        batch_size = 100000
+        for i in range(0, len(updates), batch_size):
+            c.executemany("UPDATE users SET domain = ? WHERE id = ?", updates[i:i+batch_size])
+        conn.commit()
+
+    conn.close()
+
 def main():
+
     args = parse_args()
     logging.info("Starting analysis...")
 
@@ -918,8 +974,11 @@ def main():
     parse_potfile(args.potfile, db_path)
     logging.info("Loaded cracked hashes from potfile into DB.")
 
-    parse_ntds(args.ntds, db_path, args.domain_mapping, args.interactive)
+    parse_ntds(args.ntds, db_path)
     logging.info("Parsed users and hashes from NTDS into DB.")
+
+    apply_domain_mapping(db_path, args.domain_mapping, args.interactive)
+    logging.info("Applied domain mappings.")
 
     if args.bloodhound:
         parse_bloodhound(args.bloodhound, db_path)
