@@ -537,6 +537,44 @@ def flags():
 
     return render_template('flags.html', users=flags_data, page=page, per_page=per_page)
 
+@app.route('/mappings', methods=['GET', 'POST'])
+def mappings():
+    db = get_db()
+    c = db.cursor()
+
+    if request.method == 'POST':
+        user_id = request.form.get('user_id')
+        new_domain = request.form.get('new_domain')
+        if user_id and new_domain:
+            c.execute("UPDATE users SET domain = ? WHERE id = ?", (new_domain, user_id))
+            db.commit()
+
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 50, type=int)
+    offset = (page - 1) * per_page
+    search = request.args.get('search', '')
+
+    query_params = []
+    where_clause = ""
+    if search:
+        where_clause = "WHERE u.original_domain LIKE ? OR u.domain LIKE ? OR u.username LIKE ?"
+        query_params.extend(['%' + search + '%', '%' + search + '%', '%' + search + '%'])
+
+    # Get total count for pagination
+    c.execute(f"SELECT COUNT(*) FROM users u {where_clause}", query_params)
+    total_users = c.fetchone()[0]
+
+    c.execute(f"""
+        SELECT u.id, u.domain, u.username, u.original_domain
+        FROM users u
+        {where_clause}
+        ORDER BY u.original_domain, u.username
+        LIMIT ? OFFSET ?
+    """, query_params + [per_page, offset])
+    mapping_data = c.fetchall()
+
+    return render_template('mappings.html', users=mapping_data, page=page, per_page=per_page, search=search, total_users=total_users)
+
 @app.route('/history')
 def history():
     page = request.args.get('page', 1, type=int)

@@ -20,6 +20,7 @@ def init_db(db_path: str):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT,
             username TEXT,
+            original_domain TEXT,
             rid INTEGER,
             enabled BOOLEAN DEFAULT 1,
             pwdneverexpires BOOLEAN DEFAULT 0,
@@ -96,6 +97,8 @@ def parse_args():
     optional.add_argument('--enabled-only', action='store_true', help="Show only 'enabled' users (requires BloodHound data)")
     optional.add_argument('--redact', action='store_true', help="Redact the passwords and hashes in reports")
     optional.add_argument('--outdir', help="Directory to output HTML reports to. Defaults to report_<timestamp>")
+    optional.add_argument('--domain-mapping', help="JSON file containing 1-to-many domain mappings from NTDS to BloodHound names")
+    optional.add_argument('--interactive', action='store_true', help="Prompt user for ambiguous domain mappings (requires --domain-mapping)")
 
     return parser.parse_args()
 
@@ -133,19 +136,41 @@ def parse_potfile(potfile_path: str, db_path: str):
     conn.commit()
     conn.close()
 
-def parse_ntds(ntds_path: str, db_path: str):
+def parse_ntds(ntds_path: str, db_path: str, mapping_path: Optional[str] = None, interactive: bool = False):
     """Parses NTDS dump, skips krbtgt/machine accounts, inserts directly into DB."""
     logging.info(f"Parsing NTDS file: {ntds_path}")
+
+    domain_mapping = {}
+    if mapping_path:
+        try:
+            with open(mapping_path, 'r', encoding='utf-8') as mf:
+                domain_mapping = json.load(mf)
+            # Ensure all keys and values are strings and values are lists
+            domain_mapping = {str(k): [str(v) for v in vals] for k, vals in domain_mapping.items()}
+        except Exception as e:
+            logging.error(f"Failed to read domain mapping file: {e}")
+            domain_mapping = {}
+
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
-    users_batch = []
-    hashes_batch = []
+    # We use a temporary table to hold all parsed accounts before finalizing mappings
+    c.executescript('''
+        CREATE TEMP TABLE ntds_temp (
+            id INTEGER PRIMARY KEY,
+            original_domain TEXT,
+            username TEXT,
+            rid INTEGER,
+            lm_hash TEXT,
+            nt_hash TEXT,
+            is_history BOOLEAN
+        );
+    ''')
 
-    user_key_to_id = {} # map domain\username -> internal sqlite rowid
+    temp_batch = []
     next_user_id = 1
-
     count = 0
+
     with open(ntds_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
             count += 1
@@ -176,42 +201,138 @@ def parse_ntds(ntds_path: str, db_path: str):
             lm_hash = parts[2]
             nt_hash = parts[3]
 
-            # Identify if it's history
             is_history = False
             base_username = username
-            # NTDS extraction often adds _history followed by some ID, or simply _history
             history_match = re.search(r'_history\d*$', username, re.IGNORECASE)
             if history_match:
                 base_username = username[:history_match.start()]
                 is_history = True
 
-            # Skip KRBTGT and machine accounts
             if base_username.lower() == 'krbtgt' or base_username.endswith('$'):
                 continue
 
-            key = f"{domain}\\{base_username}".lower()
+            temp_batch.append((next_user_id, domain, base_username, rid, lm_hash, nt_hash, is_history))
+            next_user_id += 1
 
-            if key not in user_key_to_id:
-                user_key_to_id[key] = next_user_id
-                users_batch.append((next_user_id, domain, base_username, rid))
-                next_user_id += 1
+            if len(temp_batch) >= 100000:
+                c.executemany("INSERT INTO ntds_temp (id, original_domain, username, rid, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?, ?, ?, ?)", temp_batch)
+                temp_batch = []
 
-            user_id = user_key_to_id[key]
-            hashes_batch.append((user_id, lm_hash, nt_hash, is_history))
+    if temp_batch:
+        c.executemany("INSERT INTO ntds_temp (id, original_domain, username, rid, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?, ?, ?, ?)", temp_batch)
 
-            if len(users_batch) >= 100000:
-                c.executemany("INSERT INTO users (id, domain, username, rid) VALUES (?, ?, ?, ?)", users_batch)
-                users_batch = []
+    conn.commit()
 
-            if len(hashes_batch) >= 100000:
-                c.executemany("INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)", hashes_batch)
-                hashes_batch = []
+    logging.info("Resolving domain mappings...")
+    c.execute("CREATE INDEX idx_ntds_temp_dom_user ON ntds_temp(original_domain, username)")
 
-    if users_batch:
-        c.executemany("INSERT INTO users (id, domain, username, rid) VALUES (?, ?, ?, ?)", users_batch)
+    # Process unique original_domain/username combinations to determine final domain
+    c.execute("SELECT DISTINCT original_domain, username FROM ntds_temp")
+    unique_users = c.fetchall()
+
+    users_batch = []
+    user_key_to_id = {}
+    next_final_id = 1
+
+    orig_to_final_id = {}
+
+    for row in unique_users:
+        orig_domain = row[0]
+        base_username = row[1]
+
+        final_domain = orig_domain
+
+        # Check mapping
+        if orig_domain in domain_mapping:
+            options = domain_mapping[orig_domain]
+            if len(options) == 1:
+                final_domain = options[0]
+            elif len(options) > 1:
+                # Automatic resolution: keep options that exist as literal original_domains in NTDS
+                # Wait, the user said: "if user provided a json file that maps short to short.domain and corp.short.domain
+                # we should look for ntds hashes that match short.domain/user1 and corp.short.domain/user1.
+                # If corp.short.domain/user1 is found, short/user1 should automatically match to short.domain/user1"
+
+                # Let's see which options ALREADY exist in the NTDS for this exact username
+                found_options = []
+                for opt in options:
+                    c.execute("SELECT 1 FROM ntds_temp WHERE lower(original_domain) = ? AND lower(username) = ? LIMIT 1", (opt.lower(), base_username.lower()))
+                    if c.fetchone():
+                        found_options.append(opt)
+
+                # Options that are NOT found in the NTDS for this username are the remaining candidates
+                remaining_options = [opt for opt in options if opt not in found_options]
+
+                if len(remaining_options) == 1:
+                    final_domain = remaining_options[0]
+                elif len(remaining_options) == 0:
+                    final_domain = options[0] # Fallback if all options are magically found elsewhere
+                else:
+                    if interactive:
+                        print(f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'.")
+                        print("Options:")
+                        for idx, opt in enumerate(remaining_options):
+                            print(f"  [{idx + 1}] {opt}")
+                        print(f"  [Enter] Default to: {remaining_options[0]}")
+
+                        while True:
+                            choice = input("Select an option (number): ").strip()
+                            if choice == "":
+                                final_domain = remaining_options[0]
+                                break
+                            try:
+                                choice_idx = int(choice) - 1
+                                if 0 <= choice_idx < len(remaining_options):
+                                    final_domain = remaining_options[choice_idx]
+                                    break
+                                else:
+                                    print("Invalid choice.")
+                            except ValueError:
+                                print("Please enter a number.")
+                    else:
+                        final_domain = remaining_options[0]
+
+        # Note: RID is pulled per hash, but in users table it's one per domain\username. We can grab any RID for this user.
+        c.execute("SELECT rid FROM ntds_temp WHERE original_domain = ? AND username = ? LIMIT 1", (orig_domain, base_username))
+        rid_row = c.fetchone()
+        rid = rid_row[0] if rid_row else 0
+
+        # We might have collisions if two original domains map to the same final domain with the same username.
+        # We merge them by using a composite key
+        key = f"{final_domain}\\{base_username}".lower()
+        if key not in user_key_to_id:
+            user_key_to_id[key] = next_final_id
+            # Note: storing orig_domain. If multiple orig_domains map to same final_domain, we just store the first one encountered.
+            users_batch.append((next_final_id, final_domain, base_username, orig_domain, rid))
+            next_final_id += 1
+
+        orig_to_final_id[f"{orig_domain}\\{base_username}".lower()] = user_key_to_id[key]
+
+    # Insert into real users table
+    batch_size = 100000
+    for i in range(0, len(users_batch), batch_size):
+        c.executemany("INSERT INTO users (id, domain, username, original_domain, rid) VALUES (?, ?, ?, ?, ?)", users_batch[i:i+batch_size])
+
+    # Now we need to map the temp hashes to the final user_ids
+    logging.info("Migrating hashes from temp to final tables...")
+
+    hashes_batch = []
+    c.execute("SELECT original_domain, username, lm_hash, nt_hash, is_history FROM ntds_temp")
+    for h_row in c.fetchall():
+        orig_domain, username, lm_hash, nt_hash, is_history = h_row
+        orig_key = f"{orig_domain}\\{username}".lower()
+        final_id = orig_to_final_id.get(orig_key)
+        if final_id:
+            hashes_batch.append((final_id, lm_hash, nt_hash, is_history))
+
+        if len(hashes_batch) >= 100000:
+            c.executemany("INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)", hashes_batch)
+            hashes_batch = []
+
     if hashes_batch:
         c.executemany("INSERT INTO hashes (user_id, lm_hash, nt_hash, is_history) VALUES (?, ?, ?, ?)", hashes_batch)
 
+    c.execute("DROP TABLE ntds_temp")
     conn.commit()
 
     logging.info("Updating hashes with cracked passwords...")
@@ -617,7 +738,7 @@ def main():
     parse_potfile(args.potfile, db_path)
     logging.info("Loaded cracked hashes from potfile into DB.")
 
-    parse_ntds(args.ntds, db_path)
+    parse_ntds(args.ntds, db_path, args.domain_mapping, args.interactive)
     logging.info("Parsed users and hashes from NTDS into DB.")
 
     if args.bloodhound:

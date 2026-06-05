@@ -37,7 +37,7 @@ The primary script for ingestion is `adpa.py`. It requires the NTDS file and the
 python adpa.py --ntds extracted_hashes.ntds --potfile hashcat.potfile
 ```
 
-**Advanced Example with BloodHound and Policy:**
+**Advanced Example with BloodHound, Policy, and Domain Mappings:**
 ```bash
 python adpa.py \
     --ntds extracted_hashes.ntds \
@@ -45,9 +45,24 @@ python adpa.py \
     --bloodhound bloodhound_users.json bloodhound_groups.json \
     --policy example_policy.json \
     --high-value example_high_value_groups.txt \
+    --domain-mapping mapping.json \
+    --interactive \
     --redact
 ```
 *Note: The `--redact` flag will redact the cracked passwords in the database and web reports.*
+
+**Domain Mapping (`--domain-mapping` & `--interactive`):**
+Sometimes the domain names in the NTDS dump differ from the domain names found in BloodHound exports (e.g. short NetBIOS names versus FQDNs). You can provide a JSON file via `--domain-mapping` to map NTDS domain names to one or more BloodHound target domains.
+* **Format:** The file should contain a dictionary mapping original NTDS domains to lists of possible BloodHound domains:
+  ```json
+  {
+    "SHORTDOM": ["fqdn1.local", "corp.fqdn1.local"],
+    "OTHERDOM": ["other.local"]
+  }
+  ```
+* **Automatic Resolution:** If a domain has a 1-to-many mapping, the tool will attempt to automatically resolve the ambiguity by checking if any of the target domains for that user explicitly appear elsewhere in the NTDS data.
+* **Interactive Mode:** If you pass the `--interactive` flag, any mapping ambiguity that cannot be automatically resolved will prompt the user in the CLI to manually select the correct domain for each affected account.
+* **GUI Resolution:** Alternatively, you can run the web app and use the "Domain Mappings" tab to manually correct any misaligned domains after the initial data ingestion is complete.
 
 **Using the Example Files:**
 - `example_policy.json`: A sample password policy definition. You can modify it to match your organization's required base password length/complexity, and define Fine-Grained Password Policies (FGPP) for specific groups (e.g., Domain Admins), OUs, or username patterns (e.g., service accounts).

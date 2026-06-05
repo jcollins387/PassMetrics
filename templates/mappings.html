@@ -1,0 +1,63 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2>Domain Mappings Review</h2>
+</div>
+
+<div class="card">
+    <form method="GET" action="/mappings" style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+        <input type="text" id="search" name="search" placeholder="Search Domain or Username" value="{{ search }}" style="padding: 5px; background: #333; color: white; border: 1px solid #555;">
+        <select name="per_page" onchange="this.form.submit()" style="padding: 5px; background: #333; color: white; border: 1px solid #555;">
+            <option value="50" {% if per_page == 50 %}selected{% endif %}>50 per page</option>
+            <option value="100" {% if per_page == 100 %}selected{% endif %}>100 per page</option>
+            <option value="250" {% if per_page == 250 %}selected{% endif %}>250 per page</option>
+            <option value="500" {% if per_page == 500 %}selected{% endif %}>500 per page</option>
+        </select>
+        <button type="submit" style="padding: 5px 10px; background: #4dabf7; color: #121212; border: none; cursor: pointer;">Search</button>
+        <a href="/mappings" style="padding: 5px 10px; background: #555; color: white; text-decoration: none;">Clear</a>
+    </form>
+</div>
+
+<p>Showing {{ users|length }} of {{ total_users }} users.</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>Username</th>
+            <th>Original Domain (NTDS)</th>
+            <th>Target Domain (Mapped)</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for u in users %}
+        <tr>
+            <td>{{ u.username }}</td>
+            <td>{{ u.original_domain }}</td>
+            <td>
+                <form method="POST" action="/mappings?page={{ page }}&per_page={{ per_page }}&search={{ search }}" style="display: flex; gap: 5px;">
+                    <input type="hidden" name="user_id" value="{{ u.id }}">
+                    <input type="text" name="new_domain" value="{{ u.domain }}" required style="padding: 4px; background: #222; color: white; border: 1px solid #444;">
+                    <button type="submit" style="padding: 4px 8px; background: #4dabf7; color: #121212; border: none; cursor: pointer; font-size: 12px;">Update</button>
+                </form>
+            </td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="3" style="text-align: center;">No users found.</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<div class="pagination">
+    {% if page > 1 %}
+        <a href="/mappings?page={{ page-1 }}&per_page={{ per_page }}&search={{ search }}">Previous</a>
+    {% endif %}
+    <span>Page {{ page }}</span>
+    {% if users|length == per_page %}
+        <a href="/mappings?page={{ page+1 }}&per_page={{ per_page }}&search={{ search }}">Next</a>
+    {% endif %}
+</div>
+
+{% endblock %}
