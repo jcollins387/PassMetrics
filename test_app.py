@@ -1,6 +1,5 @@
 import pytest
 import sqlite3
-import json
 import os
 from flask import g
 from app import app, get_db
