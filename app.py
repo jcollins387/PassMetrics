@@ -7,6 +7,8 @@ from flask import Flask, render_template, request, g, Response, session, redirec
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
 def get_secret_key():
     env_key = os.environ.get('FLASK_SECRET_KEY')
