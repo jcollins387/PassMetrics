@@ -172,3 +172,7 @@ def test_close_connection_with_db():
 def test_close_connection_without_db():
     with app.app_context():
         pass # g._database is not set, should not raise an exception
+
+def test_secure_session_configuration():
+    assert app.config['SESSION_COOKIE_HTTPONLY'] is True
+    assert app.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
