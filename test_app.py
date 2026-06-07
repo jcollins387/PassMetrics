@@ -208,3 +208,16 @@ def test_login_no_next_url(client):
 
     assert response.status_code == 302
     assert response.headers['Location'] == '/'  # Should redirect to dashboard by default
+
+def test_login_rate_limiting(client):
+    got_429 = False
+    for _ in range(10):
+        response = client.post('/login', data={
+            'username': 'testadmin',
+            'password': 'wrong_password'
+        })
+        if response.status_code == 429:
+            got_429 = True
+            break
+
+    assert got_429, "Expected to eventually hit a 429 Too Many Requests response"

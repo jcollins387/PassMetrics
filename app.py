@@ -6,8 +6,16 @@ import os
 from urllib.parse import urlparse, urljoin
 from flask import Flask, render_template, request, g, Response, session, redirect, url_for, flash
 from werkzeug.security import check_password_hash, generate_password_hash
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    storage_uri="memory://"
+)
 
 def is_safe_url(target):
     ref_url = urlparse(request.host_url)
@@ -60,6 +68,7 @@ def require_login():
                 return redirect(url_for('change_password'))
 
 @app.route('/login', methods=['GET', 'POST'])
+@limiter.limit("5 per minute")
 def login():
     if request.method == 'POST':
         username = request.form['username']
