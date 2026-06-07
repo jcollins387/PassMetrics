@@ -2,7 +2,7 @@ import pytest
 import sqlite3
 import os
 from flask import g
-from app import app, get_db
+from app import app, get_db, query_db
 
 @pytest.fixture
 def client():
@@ -220,3 +220,62 @@ def test_login_rate_limiting(client):
             break
 
     assert got_429, "Expected to eventually hit a 429 Too Many Requests response"
+
+def test_query_db_multiple_results(client):
+    with app.app_context():
+        db = get_db()
+        c = db.cursor()
+        c.execute("DELETE FROM users")
+        c.execute("INSERT INTO users (domain, username, original_domain) VALUES ('d1', 'u1', 'o1')")
+        c.execute("INSERT INTO users (domain, username, original_domain) VALUES ('d2', 'u2', 'o2')")
+        db.commit()
+
+        results = query_db("SELECT username FROM users ORDER BY username")
+        assert len(results) == 2
+        assert results[0]['username'] == 'u1'
+        assert results[1]['username'] == 'u2'
+
+def test_query_db_single_result(client):
+    with app.app_context():
+        db = get_db()
+        c = db.cursor()
+        c.execute("DELETE FROM users")
+        c.execute("INSERT INTO users (domain, username, original_domain) VALUES ('d1', 'u1', 'o1')")
+        c.execute("INSERT INTO users (domain, username, original_domain) VALUES ('d2', 'u2', 'o2')")
+        db.commit()
+
+        result = query_db("SELECT username FROM users WHERE domain = ?", ['d2'], one=True)
+        assert result is not None
+        assert result['username'] == 'u2'
+
+def test_query_db_no_results(client):
+    with app.app_context():
+        db = get_db()
+        c = db.cursor()
+        c.execute("DELETE FROM users")
+        db.commit()
+
+        # one=False should return empty list
+        results = query_db("SELECT username FROM users")
+        assert results == []
+
+        # one=True should return None
+        result = query_db("SELECT username FROM users", one=True)
+        assert result is None
+
+def test_query_db_with_args(client):
+    with app.app_context():
+        db = get_db()
+        c = db.cursor()
+        c.execute("DELETE FROM users")
+        c.execute("INSERT INTO users (domain, username, original_domain) VALUES ('d1', 'u1', 'o1')")
+        db.commit()
+
+        # Test valid args
+        result = query_db("SELECT original_domain FROM users WHERE domain = ? AND username = ?", ['d1', 'u1'], one=True)
+        assert result is not None
+        assert result['original_domain'] == 'o1'
+
+        # Test invalid args (no match)
+        result = query_db("SELECT original_domain FROM users WHERE domain = ? AND username = ?", ['d1', 'unknown'], one=True)
+        assert result is None
