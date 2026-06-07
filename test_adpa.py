@@ -122,3 +122,25 @@ OTHER\\user3:1004:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c08
     os.remove("test_mapping.json")
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
+
+def test_parse_bloodhound_invalid_json():
+    import json
+    import os
+    import tempfile
+    from unittest.mock import patch
+    from adpa import _process_bh_file
+
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
+        tmp.write("{invalid_json_here")
+        tmp_path = tmp.name
+
+    try:
+        with patch('adpa.logging.error') as mock_log:
+            user_updates, group_inserts = _process_bh_file((tmp_path, {}))
+            assert user_updates == []
+            assert group_inserts == []
+            mock_log.assert_called_once()
+            args, _ = mock_log.call_args
+            assert args[0].startswith("Failed to parse Bloodhound file")
+    finally:
+        os.remove(tmp_path)
