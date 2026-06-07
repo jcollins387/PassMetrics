@@ -62,7 +62,9 @@ def client():
             must_change_password INTEGER DEFAULT 0
         )''')
         # We need a user to bypass change_password redirect
-        c.execute("INSERT INTO web_users (id, username, password_hash, must_change_password) VALUES (1, 'testadmin', 'hash', 0)")
+        from werkzeug.security import generate_password_hash
+        hashed_pw = generate_password_hash('password123')
+        c.execute("INSERT INTO web_users (id, username, password_hash, must_change_password) VALUES (1, 'testadmin', ?, 0)", (hashed_pw,))
         conn.commit()
         conn.close()
 
@@ -176,3 +178,33 @@ def test_close_connection_without_db():
 def test_secure_session_configuration():
     assert app.config['SESSION_COOKIE_HTTPONLY'] is True
     assert app.config['SESSION_COOKIE_SAMESITE'] == 'Lax'
+
+def test_open_redirect_login_unsafe_url(client):
+    app.before_request_funcs[None] = []
+    response = client.post('/login?next=http://malicious.com', data={
+        'username': 'testadmin',
+        'password': 'password123'
+    }, follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers['Location'] == '/'  # Should redirect to dashboard, not malicious.com
+
+def test_open_redirect_login_safe_url(client):
+    app.before_request_funcs[None] = []
+    response = client.post('/login?next=/mappings', data={
+        'username': 'testadmin',
+        'password': 'password123'
+    }, follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers['Location'] == '/mappings'  # Should redirect to the safe relative URL
+
+def test_login_no_next_url(client):
+    app.before_request_funcs[None] = []
+    response = client.post('/login', data={
+        'username': 'testadmin',
+        'password': 'password123'
+    }, follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers['Location'] == '/'  # Should redirect to dashboard by default

@@ -3,10 +3,16 @@ import io
 import csv
 import json
 import os
+from urllib.parse import urlparse, urljoin
 from flask import Flask, render_template, request, g, Response, session, redirect, url_for, flash
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
+
+def is_safe_url(target):
+    ref_url = urlparse(request.host_url)
+    test_url = urlparse(urljoin(request.host_url, target))
+    return test_url.scheme in ('http', 'https') and ref_url.netloc == test_url.netloc
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
@@ -66,6 +72,9 @@ def login():
             session['username'] = user['username']
 
             next_url = request.args.get('next')
+            if next_url and not is_safe_url(next_url):
+                next_url = url_for('dashboard')
+
             if user['must_change_password'] == 1:
                 return redirect(url_for('change_password'))
             return redirect(next_url or url_for('dashboard'))
