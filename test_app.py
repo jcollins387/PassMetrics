@@ -159,3 +159,16 @@ def test_get_secret_key_random_fallback():
     assert len(key2) == 24
     assert key1 != key2 # random keys should be different
     assert not os.path.exists('.flask_secret') # should not create file
+
+from unittest.mock import MagicMock
+
+def test_close_connection_with_db():
+    mock_db = MagicMock()
+    with app.app_context():
+        g._database = mock_db
+
+    mock_db.close.assert_called_once()
+
+def test_close_connection_without_db():
+    with app.app_context():
+        pass # g._database is not set, should not raise an exception
