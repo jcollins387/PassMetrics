@@ -163,6 +163,60 @@ def test_get_secret_key_random_fallback():
 
 from unittest.mock import MagicMock
 
+def test_get_db_creates_and_caches_connection():
+    with app.app_context():
+        # Clean up g if it was left dirty
+        if hasattr(g, '_database'):
+            del g._database
+
+        db1 = get_db()
+        db2 = get_db()
+
+        # Verify it returns a connection
+        assert isinstance(db1, sqlite3.Connection)
+
+        # Verify it caches the connection
+        assert db1 is db2
+
+        # Verify row_factory is set
+        assert db1.row_factory == sqlite3.Row
+
+def test_get_db_uses_config_path(client):
+    with app.app_context():
+        if hasattr(g, '_database'):
+            del g._database
+
+        # App config 'DATABASE' should be 'test_analysis.db' via the client fixture
+        expected_path = app.config.get('DATABASE')
+
+        # We can mock sqlite3.connect just to assert the path argument
+        import unittest.mock as mock
+        with mock.patch('sqlite3.connect') as mock_connect:
+            mock_connect.return_value = mock.MagicMock()
+            get_db()
+            mock_connect.assert_called_once_with(expected_path)
+
+def test_get_db_uses_fallback_path():
+    with app.app_context():
+        if hasattr(g, '_database'):
+            del g._database
+
+        # Temporarily remove DATABASE from config
+        original_db = app.config.pop('DATABASE', None)
+
+        try:
+            import unittest.mock as mock
+            with mock.patch('sqlite3.connect') as mock_connect:
+                mock_connect.return_value = mock.MagicMock()
+                get_db()
+                # Should fall back to the global DATABASE variable which is 'analysis.db'
+                from app import DATABASE
+                mock_connect.assert_called_once_with(DATABASE)
+        finally:
+            # Restore config
+            if original_db is not None:
+                app.config['DATABASE'] = original_db
+
 def test_close_connection_with_db():
     mock_db = MagicMock()
     with app.app_context():
