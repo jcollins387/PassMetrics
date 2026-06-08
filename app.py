@@ -357,7 +357,7 @@ def export_reset_csv():
     c = db.cursor()
 
     c.execute('''
-        SELECT u.domain, u.username
+        SELECT u.domain, u.username, h.cracked_password
         FROM users u
         JOIN hashes h ON u.id = h.user_id
         WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
@@ -367,10 +367,10 @@ def export_reset_csv():
 
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(['Domain', 'Username', 'Needs Reset'])
+    cw.writerow(['Domain', 'Username', 'Password', 'Needs Reset'])
 
     for row in rows:
-        cw.writerow([row['domain'], row['username'], 'TRUE'])
+        cw.writerow([row['domain'], row['username'], row['cracked_password'], 'TRUE'])
 
     output = si.getvalue()
     return Response(
