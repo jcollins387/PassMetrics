@@ -438,6 +438,49 @@ def test_query_db_with_args(client):
         assert result is None
 
 
+def test_kerberoastable_route(client):
+    app.before_request_funcs[None] = []
+
+    with app.app_context():
+        db = get_db()
+        c = db.cursor()
+        c.execute("DELETE FROM users")
+        c.execute("DELETE FROM hashes")
+
+        # User 1: kerberoastable=1, enabled=1 (Should appear)
+        c.execute("INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (1, 'test_domain1', 'test_user1', 'test_orig1', 1, 1)")
+        c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (1, 0, 'cracked_pass1')")
+
+        # User 2: kerberoastable=1, enabled=0 (Should NOT appear)
+        c.execute("INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (2, 'test_domain2', 'test_user2', 'test_orig2', 1, 0)")
+        c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (2, 0, 'cracked_pass2')")
+
+        # User 3: kerberoastable=0, enabled=1 (Should NOT appear)
+        c.execute("INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (3, 'test_domain3', 'test_user3', 'test_orig3', 0, 1)")
+        c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (3, 0, 'cracked_pass3')")
+
+        db.commit()
+
+    response = client.get("/kerberoastable")
+
+    assert response.status_code == 200
+
+    # Check that User 1 appears
+    assert b"test_domain1" in response.data
+    assert b"test_user1" in response.data
+    assert b"cracked_pass1" in response.data
+
+    # Check that User 2 does not appear
+    assert b"test_domain2" not in response.data
+    assert b"test_user2" not in response.data
+    assert b"cracked_pass2" not in response.data
+
+    # Check that User 3 does not appear
+    assert b"test_domain3" not in response.data
+    assert b"test_user3" not in response.data
+    assert b"cracked_pass3" not in response.data
+
+
 def test_asreproastable_route(client):
     app.before_request_funcs[None] = []
 
