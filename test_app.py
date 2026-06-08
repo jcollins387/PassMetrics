@@ -522,3 +522,15 @@ def test_asreproastable_route(client):
     assert b"test_domain3" not in response.data
     assert b"test_user3" not in response.data
     assert b"cracked_pass3" not in response.data
+
+def test_logout(client):
+    with client.session_transaction() as sess:
+        sess["user_id"] = 1
+
+    response = client.get("/logout")
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/login"
+
+    with client.session_transaction() as sess:
+        assert "user_id" not in sess
