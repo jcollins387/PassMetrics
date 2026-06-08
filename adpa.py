@@ -804,27 +804,35 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
 
     # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries during automatic resolution
     c.execute("SELECT DISTINCT domain, username FROM users")
-    existing_ntds_combos = {(r[0].lower(), r[1].lower()) for r in c.fetchall()}
+    existing_ntds_combos = {(r[0].lower(), r[1].lower()) for r in c}
+
+    # Pre-calculate lowercased options to avoid redundant string operations in the loop
+    mapping_cache = {}
+    for dom, opts in domain_mapping.items():
+        mapping_cache[dom] = [(opt, opt.lower()) for opt in opts]
 
     updates = []
 
     for user_id, orig_domain, base_username in users_to_map:
-        options = domain_mapping[orig_domain.lower()]
+        options_cached = mapping_cache[orig_domain.lower()]
+        options = [opt for opt, _ in options_cached]
         final_domain = orig_domain
 
-        if len(options) == 1:
-            final_domain = options[0]
-        elif len(options) > 1:
+        if len(options_cached) == 1:
+            final_domain = options_cached[0][0]
+        elif len(options_cached) > 1:
             found_options = []
-            for opt in options:
-                if (opt.lower(), base_username.lower()) in existing_ntds_combos:
+            base_username_lower = base_username.lower()
+            for opt, opt_lower in options_cached:
+                if (opt_lower, base_username_lower) in existing_ntds_combos:
                     found_options.append(opt)
 
             if len(found_options) == 1:
                 # If exactly one option exists, select the other one that does NOT exist
                 # Wait, rule: "If one of these exists, the other should be selected."
                 # If short\user exists and option1\user exists but option2\user doesn't, pick option2
-                other_options = [opt for opt in options if opt.lower() != found_options[0].lower()]
+                found_opt_lower = found_options[0].lower()
+                other_options = [opt for opt, opt_lower in options_cached if opt_lower != found_opt_lower]
                 if other_options:
                     final_domain = other_options[0]
                 else:
