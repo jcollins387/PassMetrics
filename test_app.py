@@ -534,3 +534,94 @@ def test_logout(client):
 
     with client.session_transaction() as sess:
         assert "user_id" not in sess
+
+
+def test_change_password_unauthenticated_redirect(client):
+    response = client.get("/change_password")
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/login"
+
+
+def test_change_password_get_authenticated(client):
+    with client.session_transaction() as sess:
+        sess["user_id"] = 1
+    response = client.get("/change_password")
+    assert response.status_code == 200
+
+
+def test_change_password_post_incorrect_current(client):
+    with client.session_transaction() as sess:
+        sess["user_id"] = 1
+    response = client.post(
+        "/change_password",
+        data={
+            "current_password": "wrongpassword",
+            "new_password": "newpassword123",
+            "confirm_password": "newpassword123"
+        },
+        follow_redirects=True
+    )
+    assert b"Incorrect current password" in response.data
+
+
+def test_change_password_post_mismatch_new(client):
+    with client.session_transaction() as sess:
+        sess["user_id"] = 1
+    response = client.post(
+        "/change_password",
+        data={
+            "current_password": "password123",
+            "new_password": "newpassword123",
+            "confirm_password": "newpassword456"
+        },
+        follow_redirects=True
+    )
+    assert b"New passwords do not match" in response.data
+
+
+def test_change_password_post_short_new(client):
+    with client.session_transaction() as sess:
+        sess["user_id"] = 1
+    response = client.post(
+        "/change_password",
+        data={
+            "current_password": "password123",
+            "new_password": "short",
+            "confirm_password": "short"
+        },
+        follow_redirects=True
+    )
+    assert b"Password must be at least 8 characters long" in response.data
+
+
+def test_change_password_post_success(client):
+    with client.session_transaction() as sess:
+        sess["user_id"] = 1
+
+    with client.application.app_context():
+        db = get_db()
+        db.execute("UPDATE web_users SET must_change_password = 1 WHERE id = 1")
+        db.commit()
+
+    response = client.post(
+        "/change_password",
+        data={
+            "current_password": "password123",
+            "new_password": "newpassword123",
+            "confirm_password": "newpassword123"
+        },
+        follow_redirects=True
+    )
+
+    with client.session_transaction() as sess:
+        assert "Password changed successfully" in [msg[1] for msg in sess.get('_flashes', [])]
+
+    # Since dashboard.html doesn't seem to render flash messages, we check if it redirected to the dashboard correctly
+    assert response.status_code == 200
+    assert b"Password Analysis Report" in response.data # check if we are on dashboard
+
+    with client.application.app_context():
+        from werkzeug.security import check_password_hash
+        user = query_db("SELECT * FROM web_users WHERE id = 1", one=True)
+        assert user["must_change_password"] == 0
+        assert check_password_hash(user["password_hash"], "newpassword123")
