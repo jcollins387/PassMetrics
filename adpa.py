@@ -296,7 +296,7 @@ def parse_ntds(ntds_path: str, db_path: str):
     for row in unique_users:
         orig_domain = row[0]
         base_username = row[1]
-        final_domain = orig_domain # Domain is original domain initially
+        final_domain = orig_domain  # Domain is original domain initially
 
         c.execute(
             "SELECT rid FROM ntds_temp WHERE original_domain = ? AND username = ? LIMIT 1",
@@ -730,20 +730,30 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
 
         if req_complexity:
             has_upper = has_lower = has_digit = has_special = False
+            count = 0
             for char in pwd:
-                if char.isupper():
+                if not has_upper and char.isupper():
                     has_upper = True
-                elif char.islower():
+                    count += 1
+                    if count >= 3:
+                        break
+                elif not has_lower and char.islower():
                     has_lower = True
-                elif char.isdigit():
+                    count += 1
+                    if count >= 3:
+                        break
+                elif not has_digit and char.isdigit():
                     has_digit = True
-                elif not char.isalnum():
+                    count += 1
+                    if count >= 3:
+                        break
+                elif not has_special and not char.isalnum():
                     has_special = True
+                    count += 1
+                    if count >= 3:
+                        break
 
-                if has_upper + has_lower + has_digit + has_special >= 3:
-                    break
-
-            if has_upper + has_lower + has_digit + has_special < 3:
+            if count < 3:
                 reasons.append("Fails complexity")
 
         if max_lifetime > 0 and pwdlastset:
@@ -762,7 +772,6 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
         conn.commit()
 
     conn.close()
-
 
 
 def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool):
@@ -793,8 +802,10 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
         conn.close()
         return
 
-    c.execute("SELECT id, domain, username FROM users WHERE lower(domain) IN ({seq})".format(
-        seq=','.join(['?']*len(domains_to_map_lower))), domains_to_map_lower)
+    c.execute(
+        "SELECT id, domain, username FROM users WHERE lower(domain) IN ({seq})".format(seq=",".join(["?"] * len(domains_to_map_lower))),
+        domains_to_map_lower,
+    )
     users_to_map = c.fetchall()
 
     # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries during automatic resolution
@@ -865,10 +876,10 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
                     print("Options: [1] Skip rename  [2] Enter a different domain name")
                     while True:
                         col_choice = input("Select an option (1 or 2): ").strip()
-                        if col_choice == '1':
-                            final_domain = orig_domain # Skip
+                        if col_choice == "1":
+                            final_domain = orig_domain  # Skip
                             break
-                        elif col_choice == '2':
+                        elif col_choice == "2":
                             new_dom = input("Enter new domain name: ").strip()
                             if new_dom:
                                 final_domain = new_dom
@@ -876,7 +887,9 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
                         else:
                             print("Invalid choice.")
                 else:
-                    logging.warning(f"Collision detected: Cannot rename '{orig_domain}\\{base_username}' to '{final_domain}' because it already exists. Skipping rename.")
+                    logging.warning(
+                        f"Collision detected: Cannot rename '{orig_domain}\\{base_username}' to '{final_domain}' because it already exists. Skipping rename."
+                    )
                     final_domain = orig_domain
 
         if final_domain != orig_domain:
@@ -888,10 +901,11 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
         # We process in batches
         batch_size = 100000
         for i in range(0, len(updates), batch_size):
-            c.executemany("UPDATE users SET domain = ? WHERE id = ?", updates[i:i+batch_size])
+            c.executemany("UPDATE users SET domain = ? WHERE id = ?", updates[i : i + batch_size])
         conn.commit()
 
     conn.close()
+
 
 def main():
 
