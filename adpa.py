@@ -358,6 +358,41 @@ def parse_ntds(ntds_path: str, db_path: str):
     conn.close()
 
 
+def extract_bh_identities(bh_files: List[str]) -> set:
+    """Extracts a set of all unique (domain, username) combinations from Bloodhound files."""
+    identities = set()
+    for bh_file in bh_files:
+        with open(bh_file, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                continue
+
+            data_list = []
+            if "data" in data:
+                data_list = data["data"]
+            elif "users" in data:
+                data_list = data["users"]
+            else:
+                if isinstance(data, list):
+                    data_list = data
+
+            for item in data_list:
+                item_type = item.get("type", item.get("Type", "")).upper()
+                props = item.get("Properties", {})
+
+                if item_type == "USER" or (not item_type and props.get("samaccountname")):
+                    domain = props.get("domain", "")
+                    if domain:
+                        domain = domain.split(".")[0].lower()
+                    samaccountname = props.get("samaccountname", "")
+                    if samaccountname:
+                        samaccountname = samaccountname.lower()
+                    if domain and samaccountname:
+                        identities.add((domain, samaccountname))
+    return identities
+
+
 def _build_identifier_map(bh_files: List[str]) -> Dict[str, str]:
     identifier_map = {}
     for bh_file in bh_files:
@@ -768,109 +803,137 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     conn.close()
 
 
-def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool):
-    if not mapping_path:
+def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool, bh_identities: Optional[set] = None):
+    # If neither mapping is provided, there is nothing to do.
+    if not mapping_path and not bh_identities:
         return
 
     logging.info("Applying domain mappings...")
 
     domain_mapping = {}
-    try:
-        with open(mapping_path, "r", encoding="utf-8") as mf:
-            domain_mapping = json.load(mf)
-        # Ensure all keys and values are strings and values are lists
-        domain_mapping = {str(k).lower(): [str(v) for v in vals] for k, vals in domain_mapping.items()}
-    except Exception as e:
-        logging.error(f"Failed to read domain mapping file: {e}")
-        return
+    if mapping_path:
+        try:
+            with open(mapping_path, "r", encoding="utf-8") as mf:
+                domain_mapping = json.load(mf)
+            # Ensure all keys and values are strings and values are lists
+            domain_mapping = {str(k).lower(): [str(v) for v in vals] for k, vals in domain_mapping.items()}
+        except Exception as e:
+            logging.error(f"Failed to read domain mapping file: {e}")
+            # If the mapping file fails and there are no BH identities, abort
+            if not bh_identities:
+                return
 
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
-    c.execute("SELECT DISTINCT lower(domain) FROM users")
-    existing_domains_in_db = {row[0] for row in c.fetchall()}
+    c.execute("SELECT id, domain, username FROM users")
+    all_users = c.fetchall()
 
-    # We only process users whose current domain is in the mapping keys
-    domains_to_map_lower = [d for d in existing_domains_in_db if d in domain_mapping]
-    if not domains_to_map_lower:
-        conn.close()
-        return
-
-    c.execute(
-        "SELECT id, domain, username FROM users WHERE lower(domain) IN ({seq})".format(seq=",".join(["?"] * len(domains_to_map_lower))),
-        domains_to_map_lower,
-    )
-    users_to_map = c.fetchall()
-
-    # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries during automatic resolution
+    # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries
     c.execute("SELECT DISTINCT domain, username FROM users")
     existing_ntds_combos = {(r[0].lower(), r[1].lower()) for r in c}
 
-    # Pre-calculate lowercased options to avoid redundant string operations in the loop
+    # Pre-calculate lowercased options for JSON mapping to avoid redundant string operations in the loop
     mapping_cache = {}
     for dom, opts in domain_mapping.items():
         mapping_cache[dom] = [(opt, opt.lower()) for opt in opts]
 
     updates = []
 
-    for user_id, orig_domain, base_username in users_to_map:
-        options_cached = mapping_cache[orig_domain.lower()]
-        options = [opt for opt, _ in options_cached]
+    # Optional prep for Bloodhound Auto Mapping
+    bh_identities = bh_identities or set()
+    bh_identities_by_user = {}
+    for dom_lower, user_lower in bh_identities:
+        bh_identities_by_user.setdefault(user_lower, []).append(dom_lower)
+
+    for user_id, orig_domain, base_username in all_users:
+        orig_domain_lower = orig_domain.lower()
+        base_username_lower = base_username.lower()
         final_domain = orig_domain
 
-        if len(options_cached) == 1:
-            final_domain = options_cached[0][0]
-        elif len(options_cached) > 1:
-            found_options = []
-            base_username_lower = base_username.lower()
-            for opt, opt_lower in options_cached:
-                if (opt_lower, base_username_lower) in existing_ntds_combos:
-                    found_options.append(opt)
+        needs_json_mapping = True
 
-            if len(found_options) == 1:
-                # If exactly one option exists, select the other one that does NOT exist
-                # Wait, rule: "If one of these exists, the other should be selected."
-                # If short\user exists and option1\user exists but option2\user doesn't, pick option2
-                found_opt_lower = found_options[0].lower()
-                other_options = [opt for opt, opt_lower in options_cached if opt_lower != found_opt_lower]
-                if other_options:
-                    final_domain = other_options[0]
-                else:
-                    final_domain = found_options[0]
-            elif len(found_options) == 0:
-                # If neither exist, pick the first option
-                final_domain = options[0]
+        # Phase 1: Bloodhound Automatic Mapping
+        if bh_identities:
+            # First Check: Strict match (does this domain\username already exist in BH?)
+            if (orig_domain_lower, base_username_lower) in bh_identities:
+                # Exact match found, no remapping required
+                needs_json_mapping = False
             else:
-                # If multiple exist (or all exist), leave as short domain (orig_domain)
-                final_domain = orig_domain
+                # Second Check: Fallback match based on username only
+                potential_bh_domains = bh_identities_by_user.get(base_username_lower, [])
+                if potential_bh_domains:
+                    valid_candidates = []
+                    for pot_dom in potential_bh_domains:
+                        # Check if this potential domain\user combo already exists in NTDS
+                        if (pot_dom, base_username_lower) not in existing_ntds_combos:
+                            valid_candidates.append(pot_dom)
 
-            # In cases 3 and 4 (neither exist or both exist), user can override in interactive mode
-            if interactive and (len(found_options) == 0 or len(found_options) > 1):
-                print(f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'.")
-                print("Options:")
-                for idx, opt in enumerate(options):
-                    print(f"  [{idx + 1}] {opt}")
+                    if len(valid_candidates) == 1:
+                        # Exactly one valid candidate that doesn't conflict with existing NTDS
+                        final_domain = valid_candidates[0]
+                        needs_json_mapping = False
+                    # If 0 or >1 valid candidates, it's ambiguous or blocked. Fallback to JSON.
 
-                default_opt = options[0] if len(found_options) == 0 else orig_domain
-                print(f"  [Enter] Default to: {default_opt}")
+        # Phase 2: JSON Fallback Mapping
+        if needs_json_mapping and orig_domain_lower in mapping_cache:
+            options_cached = mapping_cache[orig_domain_lower]
+            options = [opt for opt, _ in options_cached]
 
-                while True:
-                    choice = input("Select an option (number) or press Enter for default: ").strip()
-                    if choice == "":
-                        final_domain = default_opt
-                        break
-                    try:
-                        choice_idx = int(choice) - 1
-                        if 0 <= choice_idx < len(options):
-                            final_domain = options[choice_idx]
+            if len(options_cached) == 1:
+                final_domain = options_cached[0][0]
+            elif len(options_cached) > 1:
+                found_options = []
+                for opt, opt_lower in options_cached:
+                    if (opt_lower, base_username_lower) in existing_ntds_combos:
+                        found_options.append(opt)
+
+                if len(found_options) == 1:
+                    # If exactly one option exists, select the other one that does NOT exist
+                    found_opt_lower = found_options[0].lower()
+                    other_options = [opt for opt, opt_lower in options_cached if opt_lower != found_opt_lower]
+                    if other_options:
+                        final_domain = other_options[0]
+                    else:
+                        final_domain = found_options[0]
+                elif len(found_options) == 0:
+                    # If neither exist, pick the first option
+                    final_domain = options[0]
+                else:
+                    # If multiple exist (or all exist), leave as short domain (orig_domain)
+                    final_domain = orig_domain
+
+                # In cases 3 and 4 (neither exist or both exist), user can override in interactive mode
+                if interactive and (len(found_options) == 0 or len(found_options) > 1):
+                    print(f"\nAmbiguous mapping for NTDS account '{orig_domain}\\{base_username}'.")
+                    print("Options:")
+                    for idx, opt in enumerate(options):
+                        print(f"  [{idx + 1}] {opt}")
+
+                    default_opt = options[0] if len(found_options) == 0 else orig_domain
+                    print(f"  [Enter] Default to: {default_opt}")
+
+                    while True:
+                        choice = input("Select an option (number) or press Enter for default: ").strip()
+                        if choice == "":
+                            final_domain = default_opt
                             break
-                        else:
-                            print("Invalid choice.")
-                    except ValueError:
-                        print("Please enter a number.")
+                        try:
+                            choice_idx = int(choice) - 1
+                            if 0 <= choice_idx < len(options):
+                                final_domain = options[choice_idx]
+                                break
+                            else:
+                                print("Invalid choice.")
+                        except ValueError:
+                            print("Please enter a number.")
+
+        # Ensure we maintain the case-sensitive string from BH if we got it from BH mapping,
+        # but our bh_identities only have lowercase right now. If we changed it via BH mapping,
+        # final_domain will be lowercase. That's OK since the codebase uses lowercase comparisons later.
 
         if final_domain != orig_domain:
-            # Check for collision
+            # Check for collision again (just to be completely sure for JSON fallback or interactive choices)
             if (final_domain.lower(), base_username.lower()) in existing_ntds_combos:
                 if interactive:
                     print(f"\nCollision detected: User '{final_domain}\\{base_username}' already exists.")
@@ -993,7 +1056,12 @@ def main():
     parse_ntds(args.ntds, db_path)
     logging.info("Parsed users and hashes from NTDS into DB.")
 
-    apply_domain_mapping(db_path, args.domain_mapping, args.interactive)
+    bh_identities = None
+    if args.bloodhound:
+        logging.info("Extracting Bloodhound identities for automatic domain mapping...")
+        bh_identities = extract_bh_identities(args.bloodhound)
+
+    apply_domain_mapping(db_path, args.domain_mapping, args.interactive, bh_identities)
     logging.info("Applied domain mappings.")
 
     if args.bloodhound:
