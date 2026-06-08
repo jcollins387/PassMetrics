@@ -294,6 +294,91 @@ def test_parse_args_missing_required():
         with pytest.raises(SystemExit):
             parse_args()
 
+def test_domain_mapping_bloodhound_automatic(tmp_path):
+    import json
+    import sqlite3
+    import os
+    from adpa import init_db, parse_ntds, apply_domain_mapping, extract_bh_identities
+
+    # Use pytest tmp_path
+    db_path = tmp_path / "test_bh_mapping.db"
+    init_db(str(db_path))
+
+    # We want to test the three scenarios described in the requirements:
+    # user1: Strict match logic applies. NTDS is short\user1, BH is short.internal.com\user1, but we map successfully to short.internal.com via fallback. Wait, strict match means the current user already perfectly matches BH.
+    # What we actually want: user1 is short\user1 in NTDS, BH has short.internal.com\user1.
+    # Fallback matches them (only 1 valid BH domain for user1). Remaps to short.internal.com.
+
+    # user2: NTDS is short\user2. BH has short.internal.com\user2. BUT NTDS already has short.internal.com\user2.
+    # This should fail automatic mapping (Case A collision) and fallback to JSON. JSON says map short to other.local.
+
+    # user3: NTDS is short\user3. BH has short.internal.com\user3 AND long.internal.com\user3.
+    # This should fail automatic mapping (Case C ambiguous) and fallback to JSON. JSON says map short to other.local.
+
+    # To test fallback mapping correctly, the NTDS domain must be different than the BH domain.
+    # We will use NTDS domain "FOO" and BH domain "short.internal.com" (which is parsed as "short").
+    # user1: NTDS is FOO\user1. BH has short\user1. Auto maps to short.
+    # user2: NTDS is FOO\user2. BH has short\user2. BUT NTDS already has short\user2. Auto map fails, uses JSON.
+    # user3: NTDS is FOO\user3. BH has short\user3 and long\user3. Auto map fails (ambiguous), uses JSON.
+
+    ntds_data = """FOO\\user1:1001:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+FOO\\user2:1002:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+short\\user2:1003:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+FOO\\user3:1004:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+ALREADY_MATCHED\\user4:1005:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::"""
+
+    ntds_file = tmp_path / "test_ntds.txt"
+    with open(ntds_file, "w") as f:
+        f.write(ntds_data)
+
+    bh_data = {
+        "users": [
+            {"Properties": {"domain": "short.internal.com", "samaccountname": "user1"}},
+            {"Properties": {"domain": "short.internal.com", "samaccountname": "user2"}},
+            {"Properties": {"domain": "short.internal.com", "samaccountname": "user3"}},
+            {"Properties": {"domain": "long.internal.com", "samaccountname": "user3"}},
+            {"Properties": {"domain": "ALREADY_MATCHED", "samaccountname": "user4"}},
+        ]
+    }
+    bh_file = tmp_path / "test_bh.json"
+    with open(bh_file, "w") as f:
+        json.dump(bh_data, f)
+
+    mapping_data = {"FOO": ["other.local"]}
+    mapping_file = tmp_path / "test_mapping.json"
+    with open(mapping_file, "w") as f:
+        json.dump(mapping_data, f)
+
+    parse_ntds(str(ntds_file), str(db_path))
+    bh_identities = extract_bh_identities([str(bh_file)])
+    apply_domain_mapping(str(db_path), mapping_path=str(mapping_file), interactive=False, bh_identities=bh_identities)
+
+    conn = sqlite3.connect(str(db_path))
+    c = conn.cursor()
+    c.execute("SELECT original_domain, domain, username FROM users ORDER BY id")
+    users = c.fetchall()
+    conn.close()
+
+    result = {(r[0].upper(), r[2].lower()): r[1].lower() for r in users}
+
+    # Note: BloodHound extractor truncates domains to their first component.
+    # So "short.internal.com" becomes "short", and "long.internal.com" becomes "long".
+
+    # user1 auto-maps because short is the only candidate in BH and it doesn't exist in NTDS.
+    assert result[("FOO", "user1")] == "short"
+
+    # user2 fails auto-map because short/user2 already exists in NTDS.
+    # Falls back to JSON mapping 'other.local'
+    assert result[("FOO", "user2")] == "other.local"
+    assert result[("SHORT", "user2")] == "short" # Original untouched
+
+    # user3 fails auto-map because there are two candidates in BH. Falls back to JSON mapping 'other.local'
+    assert result[("FOO", "user3")] == "other.local"
+
+    # user4 strict matches because ALREADY_MATCHED/user4 is in BH.
+    assert result[("ALREADY_MATCHED", "user4")] == "already_matched"
+
+
 def test_parse_args_optional():
     with patch(
         "sys.argv",
