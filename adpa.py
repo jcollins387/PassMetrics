@@ -285,7 +285,7 @@ def parse_ntds(ntds_path: str, db_path: str):
     c.execute("CREATE INDEX idx_ntds_temp_dom_user ON ntds_temp(original_domain, username)")
 
     # Process unique original_domain/username combinations to determine final domain
-    c.execute("SELECT DISTINCT original_domain, username FROM ntds_temp")
+    c.execute("SELECT original_domain, username, MIN(rid) FROM ntds_temp GROUP BY original_domain, username")
     unique_users = c.fetchall()
 
     users_batch = []
@@ -296,14 +296,8 @@ def parse_ntds(ntds_path: str, db_path: str):
     for row in unique_users:
         orig_domain = row[0]
         base_username = row[1]
+        rid = row[2] if row[2] is not None else 0
         final_domain = orig_domain  # Domain is original domain initially
-
-        c.execute(
-            "SELECT rid FROM ntds_temp WHERE original_domain = ? AND username = ? LIMIT 1",
-            (orig_domain, base_username),
-        )
-        rid_row = c.fetchone()
-        rid = rid_row[0] if rid_row else 0
 
         key = f"{final_domain}\\{base_username}".lower()
         if key not in user_key_to_id:
