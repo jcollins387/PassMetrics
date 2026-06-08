@@ -625,3 +625,39 @@ def test_change_password_post_success(client):
         user = query_db("SELECT * FROM web_users WHERE id = 1", one=True)
         assert user["must_change_password"] == 0
         assert check_password_hash(user["password_hash"], "newpassword123")
+
+def test_export_shared_csv(client):
+    # Setup test data
+    with client.application.app_context():
+        import app
+        db = app.get_db()
+        c = db.cursor()
+        c.execute("INSERT INTO users (id, domain, username, enabled) VALUES (1, 'TEST', 'user1', 1)")
+        c.execute("INSERT INTO users (id, domain, username, enabled) VALUES (2, 'TEST', 'user2', 1)")
+        c.execute("INSERT INTO users (id, domain, username, enabled) VALUES (3, 'TEST', 'user3', 1)")
+
+        # User 1 & 2 share a cracked password
+        c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (1, 1, 'hash1', 'password123', 0)")
+        c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (2, 2, 'hash1', 'password123', 0)")
+
+        # User 3 has an uncracked shared password (this is an edge case, usually shared passwords are cracked ones or known ones)
+        # Actually shared_hashes table only stores cracked passwords or whatever was in hashes table.
+        # Let's insert uncracked shared password
+        c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (3, 3, 'hash2', NULL, 0)")
+
+        c.execute("INSERT INTO shared_hashes (nt_hash, cracked_password, count, shared_by) VALUES ('hash1', 'password123', 2, 'TEST\\user1, TEST\\user2')")
+        c.execute("INSERT INTO shared_hashes (nt_hash, cracked_password, count, shared_by) VALUES ('hash2', NULL, 2, 'TEST\\user3, TEST\\user4')")
+        db.commit()
+
+    with client.session_transaction() as sess:
+        sess['user_id'] = 1
+
+    response = client.get('/export_shared_csv')
+    assert response.status_code == 200
+    assert response.headers['Content-disposition'] == 'attachment; filename=shared_passwords.csv'
+
+    csv_data = response.data.decode('utf-8')
+    assert "Domain,Username,Password,Reuse Count\r\n" in csv_data
+    assert "TEST,user1,password123,2\r\n" in csv_data
+    assert "TEST,user2,password123,2\r\n" in csv_data
+    assert "TEST,user3,,2\r\n" in csv_data
