@@ -362,7 +362,7 @@ def extract_bh_identities(bh_files: List[str]) -> set:
     """Extracts a set of all unique (domain, username) combinations from Bloodhound files."""
     identities = set()
     for bh_file in bh_files:
-        with open(bh_file, "r", encoding="utf-8") as f:
+        with open(bh_file, "r", encoding="utf-8", errors="replace") as f:
             try:
                 data = json.load(f)
             except json.JSONDecodeError:
@@ -396,7 +396,7 @@ def extract_bh_identities(bh_files: List[str]) -> set:
 def _build_identifier_map(bh_files: List[str]) -> Dict[str, str]:
     identifier_map = {}
     for bh_file in bh_files:
-        with open(bh_file, "r", encoding="utf-8") as f:
+        with open(bh_file, "r", encoding="utf-8", errors="replace") as f:
             try:
                 data = json.load(f)
             except json.JSONDecodeError:
@@ -427,7 +427,7 @@ def _process_bh_file(args):
     user_updates = []
     group_inserts = []
 
-    with open(bh_file, "r", encoding="utf-8") as f:
+    with open(bh_file, "r", encoding="utf-8", errors="replace") as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError:

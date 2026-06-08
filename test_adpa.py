@@ -404,3 +404,20 @@ def test_parse_args_optional():
         assert args.policy == "pol.json"
         assert args.enabled_only is True
         assert args.redact is True
+
+def test_extract_bh_identities_invalid_utf8(tmp_path):
+    import adpa
+    bh_file = tmp_path / "bh_invalid.json"
+    # Create a JSON with invalid UTF-8 byte 0x86
+    with open(bh_file, "wb") as f:
+        f.write(b'{"users": [{"Properties": {"domain": "TEST", "samaccountname": "user\x86"}}]}')
+
+    # Should not raise exception
+    identities = adpa.extract_bh_identities([str(bh_file)])
+
+    # We should get ('test', 'user') or similar, basically not throwing an error
+    assert len(identities) == 1
+    # Check the result has the replacement character
+    domain, samaccountname = list(identities)[0]
+    assert domain == "test"
+    assert "user" in samaccountname
