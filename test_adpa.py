@@ -3,7 +3,8 @@ import os
 import tempfile
 from unittest.mock import patch
 
-from adpa import parse_policy, parse_high_value
+import pytest
+from adpa import parse_policy, parse_high_value, parse_args
 
 
 def test_parse_policy_none_or_empty():
@@ -278,3 +279,43 @@ test.local\\user3:1003:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7
         assert exp in groups
 
     conn.close()
+
+def test_parse_args_required():
+    with patch("sys.argv", ["adpa.py", "-n", "test.ntds", "-p", "test.potfile"]):
+        args = parse_args()
+        assert args.ntds == "test.ntds"
+        assert args.potfile == "test.potfile"
+        assert args.bloodhound is None
+        assert args.policy is None
+        assert args.enabled_only is False
+
+def test_parse_args_missing_required():
+    with patch("sys.argv", ["adpa.py", "-n", "test.ntds"]):
+        with pytest.raises(SystemExit):
+            parse_args()
+
+def test_parse_args_optional():
+    with patch(
+        "sys.argv",
+        [
+            "adpa.py",
+            "-n",
+            "test.ntds",
+            "-p",
+            "test.potfile",
+            "--bloodhound",
+            "bh1.json",
+            "bh2.json",
+            "--policy",
+            "pol.json",
+            "--enabled-only",
+            "--redact",
+        ],
+    ):
+        args = parse_args()
+        assert args.ntds == "test.ntds"
+        assert args.potfile == "test.potfile"
+        assert args.bloodhound == ["bh1.json", "bh2.json"]
+        assert args.policy == "pol.json"
+        assert args.enabled_only is True
+        assert args.redact is True
