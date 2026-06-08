@@ -386,7 +386,7 @@ def export_shared_csv():
     c = db.cursor()
 
     c.execute('''
-        SELECT u.domain, u.username, sh.count as reuse_count
+        SELECT u.domain, u.username, h.cracked_password, sh.count as reuse_count
         FROM users u
         JOIN hashes h ON u.id = h.user_id AND h.is_history = 0
         JOIN shared_hashes sh ON lower(h.nt_hash) = sh.nt_hash
@@ -396,10 +396,11 @@ def export_shared_csv():
 
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(['Domain', 'Username', 'Reuse Count'])
+    cw.writerow(['Domain', 'Username', 'Password', 'Reuse Count'])
 
     for row in rows:
-        cw.writerow([row['domain'], row['username'], row['reuse_count']])
+        pwd = row['cracked_password'] if row['cracked_password'] else ''
+        cw.writerow([row['domain'], row['username'], pwd, row['reuse_count']])
 
     output = si.getvalue()
     return Response(
