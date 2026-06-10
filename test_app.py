@@ -626,6 +626,34 @@ def test_change_password_post_success(client):
         assert user["must_change_password"] == 0
         assert check_password_hash(user["password_hash"], "newpassword123")
 
+def test_export_reset_csv(client):
+    # Setup test data
+    with client.application.app_context():
+        import app
+        db = app.get_db()
+        c = db.cursor()
+        c.execute("INSERT INTO users (id, domain, username, enabled) VALUES (1, 'TEST', 'user1', 1)")
+        c.execute("INSERT INTO users (id, domain, username, enabled) VALUES (2, 'TEST', 'user2', 1)")
+
+        # User 1 has cracked password, User 2 has uncracked, User 1 history is cracked
+        c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (1, 1, 'hash1', 'password123', 0)")
+        c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (2, 2, 'hash2', NULL, 0)")
+        c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (3, 1, 'hashold', 'oldpass', 1)")
+        db.commit()
+
+    with client.session_transaction() as sess:
+        sess['user_id'] = 1
+
+    response = client.get('/export_reset_csv')
+    assert response.status_code == 200
+    assert response.headers['Content-disposition'] == 'attachment; filename=accounts_needing_reset.csv'
+
+    csv_data = response.data.decode('utf-8')
+    assert "Domain,Username,Password,Needs Reset\r\n" in csv_data
+    assert "TEST,user1,password123,TRUE\r\n" in csv_data
+    assert "TEST,user2" not in csv_data
+
+
 def test_export_shared_csv(client):
     # Setup test data
     with client.application.app_context():
