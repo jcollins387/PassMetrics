@@ -2,6 +2,20 @@
 
 This project is a Python-based Active Directory password auditor that parses NTDS dumps, Hashcat potfiles, BloodHound JSON exports, and password policy files. It utilizes an on-disk SQLite database, multiprocessing for scalable data ingestion, and a Flask-based dynamic web portal for reporting.
 
+## Dependencies
+
+This project uses SQLCipher to encrypt the SQLite database at rest. Before installing the Python requirements, you must install the `libsqlcipher-dev` package on your system (Kali/Debian/Ubuntu):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libsqlcipher-dev
+```
+
+Then, you can install the required Python packages:
+```bash
+pip install -r requirements.txt
+```
+
 ## Usage
 
 ### 1. Extracting NTDS using `ntdsutil`
@@ -76,8 +90,11 @@ Sometimes the domain names in the NTDS dump differ from the domain names found i
   - **Matching Logic:** The script performs an exact, case-insensitive match against the group name. It is not a fuzzy match. For example, "Admin" will not match "Domain Admins". A user must be explicitly listed as a member of the exact group name provided in this file to be considered a high-value target.
 
 ### 5. Viewing the Reports
-After `adpa.py` finishes, it will generate an SQLite database named `analysis.db`.
+After `adpa.py` finishes, it will generate an encrypted SQLite database named `analysis.db`.
 You can view the interactive reports using the Flask web portal.
+
+**Database Encryption Key:**
+During the ingestion process (`adpa.py`), you will be prompted to enter a database encryption key (or one will be generated randomly and saved to `admin_credentials.txt` if running non-interactively). When starting the web application, you must provide this key either by entering it when prompted or by setting the `ADPA_DB_KEY` environment variable.
 
 **Administrator Credentials:**
 On the first run, `adpa.py` will create an `Administrator` account for the web portal.

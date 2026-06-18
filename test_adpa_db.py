@@ -1,12 +1,13 @@
-import sqlite3
+from pysqlcipher3 import dbapi2 as sqlite3
 import pytest
 from adpa import init_db
 
 def test_init_db_creates_tables_and_indexes(tmp_path):
     db_path = tmp_path / "test_schema.db"
-    init_db(str(db_path))
+    init_db(str(db_path), "testkey")
 
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA key='testkey'")
     c = conn.cursor()
 
     # Verify tables
@@ -51,11 +52,12 @@ def test_init_db_idempotent(tmp_path):
     db_path = tmp_path / "test_schema.db"
 
     # Call twice
-    init_db(str(db_path))
-    init_db(str(db_path))
+    init_db(str(db_path), "testkey")
+    init_db(str(db_path), "testkey")
 
     # Should not raise an exception, and tables should still exist
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA key='testkey'")
     c = conn.cursor()
     c.execute("SELECT name FROM sqlite_master WHERE type='table'")
     tables = {row[0] for row in c.fetchall()}

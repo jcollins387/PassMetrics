@@ -1,7 +1,7 @@
 import argparse
 import json
 import logging
-import sqlite3
+from pysqlcipher3 import dbapi2 as sqlite3
 import time
 import re
 import concurrent.futures
@@ -18,8 +18,9 @@ from typing import List, Dict, Optional
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
-def init_db(db_path: str):
+def init_db(db_path: str, db_key: str):
     conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
     c.executescript("""
         CREATE TABLE IF NOT EXISTS users (
@@ -158,9 +159,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def parse_potfile(potfile_path: str, db_path: str):
+def parse_potfile(potfile_path: str, db_path: str, db_key: str):
     """Parses hashcat potfile and inserts hashes into the DB."""
     conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
     batch = []
 
@@ -199,11 +201,12 @@ def parse_potfile(potfile_path: str, db_path: str):
     conn.close()
 
 
-def parse_ntds(ntds_path: str, db_path: str):
+def parse_ntds(ntds_path: str, db_path: str, db_key: str):
     """Parses NTDS dump, skips krbtgt/machine accounts, inserts directly into DB."""
     logging.info(f"Parsing NTDS file: {ntds_path}")
 
     conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
 
     # We use a temporary table to hold all parsed accounts before finalizing mappings
@@ -491,7 +494,7 @@ def _process_bh_file(args):
     return user_updates, group_inserts
 
 
-def parse_bloodhound(bh_files: List[str], db_path: str):
+def parse_bloodhound(bh_files: List[str], db_path: str, db_key: str):
     """Parses bloodhound users JSON and group memberships using multiprocessing."""
     if not bh_files:
         return
@@ -511,6 +514,7 @@ def parse_bloodhound(bh_files: List[str], db_path: str):
             all_group_inserts.extend(inserts)
 
     conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
 
     # Batch update users
@@ -653,9 +657,10 @@ def parse_policy(file_path: Optional[str]) -> Dict:
         return {}
 
 
-def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bool):
+def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bool, db_key: str):
     logging.info("Calculating policy violations and database setup...")
     conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
 
     enabled_filter = "AND u.enabled = 1" if enabled_only else ""
@@ -803,7 +808,7 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     conn.close()
 
 
-def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool, bh_identities: Optional[set] = None):
+def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool, bh_identities: Optional[set] = None, db_key: str = None):
     # If neither mapping is provided, there is nothing to do.
     if not mapping_path and not bh_identities:
         return
@@ -824,6 +829,8 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
                 return
 
     conn = sqlite3.connect(db_path)
+    if db_key:
+        conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
 
     c.execute("SELECT id, domain, username FROM users")
@@ -981,67 +988,89 @@ def main():
     if os.path.exists(db_path):
         os.remove(db_path)
 
-    init_db(db_path)
-
     # Generate and insert admin credentials if not already present
+    admin_password = None
+    db_key = None
+    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+    if is_interactive:
+        print("\n" + "=" * 60)
+        print("🔒 SECURITY NOTICE - INITIAL SETUP")
+        print("=" * 60)
+        print("Please set an initial password for the 'Administrator' web portal account.")
+        while True:
+            try:
+                pwd1 = getpass.getpass("Web Portal Password: ")
+                pwd2 = getpass.getpass("Confirm Web Portal Password: ")
+                if pwd1 == pwd2 and len(pwd1) > 0:
+                    admin_password = pwd1
+                    break
+                else:
+                    print("Passwords do not match or are empty. Please try again.")
+            except EOFError:
+                break
+
+        print("\nPlease set an encryption password for the SQLite Database (analysis.db).")
+        while True:
+            try:
+                pwd1 = getpass.getpass("Database Encryption Password: ")
+                pwd2 = getpass.getpass("Confirm Database Encryption Password: ")
+                if pwd1 == pwd2 and len(pwd1) > 0:
+                    db_key = pwd1
+                    break
+                else:
+                    print("Passwords do not match or are empty. Please try again.")
+            except EOFError:
+                break
+        print("=" * 60 + "\n")
+
+    if not admin_password or not db_key:
+        # Non-interactive fallback or if interactive prompt was aborted
+        if not admin_password:
+            admin_password = "".join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(16))
+        if not db_key:
+            db_key = "".join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(32))
+        creds_file = "admin_credentials.txt"
+
+        # Create file with strict permissions
+        # We open with O_CREAT | O_WRONLY | O_TRUNC to ensure we create it
+        # and set mode to 0o600
+        fd = os.open(
+            creds_file,
+            os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write("=" * 60 + "\n")
+            f.write("🔒 SECURITY NOTICE - CREDENTIALS & DB KEY\n")
+            f.write("=" * 60 + "\n")
+            f.write("Web Portal Login:\n")
+            f.write("Username: Administrator\n")
+            f.write(f"Password: {admin_password}\n")
+            f.write("=" * 60 + "\n")
+            f.write(f"Database Encryption Key (ADPA_DB_KEY):\n{db_key}\n")
+            f.write("=" * 60 + "\n")
+            f.write("Please save these credentials. You will be prompted to change the web password upon first login.\n")
+            f.write("You will need the Database Encryption Key to start the web portal.\n")
+            f.write("=" * 60 + "\n")
+
+        print("\n" + "=" * 60)
+        print("🔒 SECURITY NOTICE - INITIAL SETUP")
+        print("=" * 60)
+        print("Running in non-interactive mode or prompts bypassed.")
+        print(f"Random credentials and Database Encryption Key have been generated and saved securely to: {creds_file}")
+        print("Please check this file for the login credentials and DB key.")
+        print("=" * 60 + "\n")
+
+    init_db(db_path, db_key)
+
     conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
+
     c.execute("SELECT 1 FROM web_users WHERE username = 'Administrator'")
     if not c.fetchone():
-        admin_password = None
-        is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
-
-        if is_interactive:
-            print("\n" + "=" * 60)
-            print("🔒 SECURITY NOTICE - INITIAL SETUP")
-            print("=" * 60)
-            print("Please set an initial password for the 'Administrator' web portal account.")
-            while True:
-                try:
-                    pwd1 = getpass.getpass("Password: ")
-                    pwd2 = getpass.getpass("Confirm Password: ")
-                    if pwd1 == pwd2 and len(pwd1) > 0:
-                        admin_password = pwd1
-                        break
-                    else:
-                        print("Passwords do not match or are empty. Please try again.")
-                except EOFError:
-                    break
-            print("=" * 60 + "\n")
-
-        if not admin_password:
-            # Non-interactive fallback or if interactive prompt was aborted
-            admin_password = "".join(secrets.choice(string.ascii_letters + string.digits + "!@#$%^&*()") for _ in range(16))
-            creds_file = "admin_credentials.txt"
-
-            # Create file with strict permissions
-            # We open with O_CREAT | O_WRONLY | O_TRUNC to ensure we create it
-            # and set mode to 0o600
-            fd = os.open(
-                creds_file,
-                os.O_CREAT | os.O_WRONLY | os.O_TRUNC,
-                stat.S_IRUSR | stat.S_IWUSR,
-            )
-            with os.fdopen(fd, "w") as f:
-                f.write("=" * 60 + "\n")
-                f.write("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS\n")
-                f.write("=" * 60 + "\n")
-                f.write("Username: Administrator\n")
-                f.write(f"Password: {admin_password}\n")
-                f.write("=" * 60 + "\n")
-                f.write("Please save these credentials. You will be prompted to change the password upon first login.\n")
-                f.write("=" * 60 + "\n")
-
-            print("\n" + "=" * 60)
-            print("🔒 SECURITY NOTICE - WEB PORTAL CREDENTIALS")
-            print("=" * 60)
-            print("Running in non-interactive mode.")
-            print(f"Random administrator credentials have been generated and saved securely to: {creds_file}")
-            print("Please check this file for the login credentials.")
-            print("=" * 60 + "\n")
-
         admin_hash = generate_password_hash(admin_password)
-
         c.execute(
             "INSERT INTO web_users (username, password_hash, must_change_password) VALUES (?, ?, ?)",
             ("Administrator", admin_hash, 1),
@@ -1050,10 +1079,10 @@ def main():
 
     conn.close()
 
-    parse_potfile(args.potfile, db_path)
+    parse_potfile(args.potfile, db_path, db_key)
     logging.info("Loaded cracked hashes from potfile into DB.")
 
-    parse_ntds(args.ntds, db_path)
+    parse_ntds(args.ntds, db_path, db_key)
     logging.info("Parsed users and hashes from NTDS into DB.")
 
     bh_identities = None
@@ -1061,16 +1090,17 @@ def main():
         logging.info("Extracting Bloodhound identities for automatic domain mapping...")
         bh_identities = extract_bh_identities(args.bloodhound)
 
-    apply_domain_mapping(db_path, args.domain_mapping, args.interactive, bh_identities)
+    apply_domain_mapping(db_path, args.domain_mapping, args.interactive, bh_identities, db_key)
     logging.info("Applied domain mappings.")
 
     if args.bloodhound:
-        parse_bloodhound(args.bloodhound, db_path)
+        parse_bloodhound(args.bloodhound, db_path, db_key)
         logging.info("Parsed Bloodhound data into DB.")
 
         if args.enabled_only:
             logging.info("Applying global --enabled-only filter. Deleting disabled users and associated data from DB.")
             conn = sqlite3.connect(db_path)
+            conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
             c = conn.cursor()
 
             # Delete from related tables first
@@ -1088,6 +1118,7 @@ def main():
     policy = parse_policy(args.policy)
 
     conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
     c.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
@@ -1096,11 +1127,12 @@ def main():
     conn.commit()
     conn.close()
 
-    calculate_metrics(db_path, policy, args.redact, args.enabled_only)
+    calculate_metrics(db_path, policy, args.redact, args.enabled_only, db_key)
     logging.info("Policy violations and metrics calculated.")
 
     logging.info("Pre-calculating shared hashes...")
     conn = sqlite3.connect(db_path)
+    conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
     c.execute("""
         INSERT INTO shared_hashes (nt_hash, cracked_password, count, shared_by)
