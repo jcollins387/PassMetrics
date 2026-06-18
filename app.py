@@ -657,16 +657,18 @@ def mappings():
     search = request.args.get('search', '')
 
     if search:
-        search_term = f"%{search}%"
+        escape_char = '\\'
+        escaped_search = search.replace(escape_char, escape_char * 2).replace('%', escape_char + '%').replace('_', escape_char + '_')
+        search_term = f"%{escaped_search}%"
         query_params = [search_term, search_term, search_term]
 
-        c.execute("SELECT COUNT(*) FROM users u WHERE u.original_domain LIKE ? OR u.domain LIKE ? OR u.username LIKE ?", query_params)
+        c.execute("SELECT COUNT(*) FROM users u WHERE u.original_domain LIKE ? ESCAPE '\\' OR u.domain LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\'", query_params)
         total_users = c.fetchone()[0]
 
         c.execute("""
             SELECT u.id, u.domain, u.username, u.original_domain
             FROM users u
-            WHERE u.original_domain LIKE ? OR u.domain LIKE ? OR u.username LIKE ?
+            WHERE u.original_domain LIKE ? ESCAPE '\\' OR u.domain LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\'
             ORDER BY u.original_domain, u.username
             LIMIT ? OFFSET ?
         """, query_params + [per_page, offset])

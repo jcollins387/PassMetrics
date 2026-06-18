@@ -193,6 +193,35 @@ def test_mappings_search_injection(client):
     assert response.status_code == 200  # App should handle it gracefully
     assert b"other_user" not in response.data  # Shouldn't leak due to injection
 
+    # Test wildcard escape (DoS protection)
+    # '%' and '_' should be treated as literal characters, not wildcards
+    response = client.get('/mappings?search=%')
+    assert response.status_code == 200
+    # Since no username contains literal '%', it shouldn't match everything
+    assert b"test_user" not in response.data
+    assert b"other_user" not in response.data
+
+    with app.app_context():
+        db = get_db()
+        c = db.cursor()
+        c.execute("INSERT INTO users (domain, username, original_domain) VALUES ('test_domain', 'user%name', 'test_orig')")
+        c.execute("INSERT INTO users (domain, username, original_domain) VALUES ('test_domain', 'user_name', 'test_orig')")
+        db.commit()
+
+    response = client.get('/mappings?search=%')
+    assert response.status_code == 200
+    assert b"user%name" in response.data
+    assert b"test_user" not in response.data
+
+    response = client.get('/mappings?search=_')
+    assert response.status_code == 200
+    assert b"user_name" in response.data
+    assert b"test_user" in response.data  # 'test_user' contains an underscore
+    assert b"other_user" in response.data # 'other_user' contains an underscore
+
+    response = client.get('/mappings?search=\\')
+    assert response.status_code == 200
+
 
 def test_high_value_groups_injection(client):
     app.before_request_funcs[None] = []
