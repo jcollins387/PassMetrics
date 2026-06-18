@@ -101,17 +101,19 @@ OTHER\\user3:1004:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c08
 
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
-    init_db(DB_PATH)
+    init_db(DB_PATH, "testkey")
 
     # user1 exists as 'corp.short.local\user1', so 'SHORT\user1' should map to 'short.local\user1' due to elimination.
     # user2 has no other mapping found, so 'SHORT\user2' will default to 'short.local' (the first remaining option).
     # user3 'OTHER\user3' has no mappings found, so defaults to 'other.local'.
     from adpa import apply_domain_mapping
 
-    parse_ntds("test_mapping_ntds.txt", DB_PATH)
-    apply_domain_mapping(DB_PATH, mapping_path="test_mapping.json", interactive=False)
+    parse_ntds("test_mapping_ntds.txt", DB_PATH, "testkey")
+    apply_domain_mapping(DB_PATH, mapping_path="test_mapping.json", interactive=False, db_key="testkey")
 
-    conn = sqlite3.connect(DB_PATH)
+    from pysqlcipher3 import dbapi2 as pysqlite3
+    conn = pysqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA key='testkey'")
     c = conn.cursor()
     c.execute("SELECT original_domain, domain, username FROM users ORDER BY username")
     users = c.fetchall()
@@ -162,7 +164,7 @@ def test_parse_bloodhound_valid(tmp_path):
 
     # Use the pytest tmp_path fixture
     db_path = tmp_path / "test_bh.db"
-    init_db(str(db_path))
+    init_db(str(db_path), "testkey")
 
     # Setup test NTDS scenario based on user request to populate test users first
     # 1. Strict match: domain=test.local, username=user1
@@ -182,8 +184,8 @@ test.local\\user3:1003:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7
     with open(mapping_file, "w") as f:
         json.dump(mapping_data, f)
 
-    parse_ntds(str(ntds_file), str(db_path))
-    apply_domain_mapping(str(db_path), mapping_path=str(mapping_file), interactive=False)
+    parse_ntds(str(ntds_file), str(db_path), "testkey")
+    apply_domain_mapping(str(db_path), mapping_path=str(mapping_file), interactive=False, db_key="testkey")
 
     # Create new format BloodHound JSON file ("data" array)
     bh_new_format = {
@@ -248,10 +250,12 @@ test.local\\user3:1003:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7
         json.dump(bh_old_format, f)
 
     # Parse bloodhound files
-    parse_bloodhound([str(bh_new_file), str(bh_old_file)], str(db_path))
+    parse_bloodhound([str(bh_new_file), str(bh_old_file)], str(db_path), "testkey")
 
     # Verify updates in the database
-    conn = sqlite3.connect(str(db_path))
+    from pysqlcipher3 import dbapi2 as pysqlite3
+    conn = pysqlite3.connect(str(db_path))
+    conn.execute("PRAGMA key='testkey'")
     c = conn.cursor()
 
     # Verify User 1 (Strict match)
@@ -302,7 +306,7 @@ def test_domain_mapping_bloodhound_automatic(tmp_path):
 
     # Use pytest tmp_path
     db_path = tmp_path / "test_bh_mapping.db"
-    init_db(str(db_path))
+    init_db(str(db_path), "testkey")
 
     # We want to test the three scenarios described in the requirements:
     # user1: Strict match logic applies. NTDS is short\user1, BH is short.internal.com\user1, but we map successfully to short.internal.com via fallback. Wait, strict match means the current user already perfectly matches BH.
@@ -349,11 +353,13 @@ ALREADY_MATCHED\\user4:1005:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73
     with open(mapping_file, "w") as f:
         json.dump(mapping_data, f)
 
-    parse_ntds(str(ntds_file), str(db_path))
+    parse_ntds(str(ntds_file), str(db_path), "testkey")
     bh_identities = extract_bh_identities([str(bh_file)])
-    apply_domain_mapping(str(db_path), mapping_path=str(mapping_file), interactive=False, bh_identities=bh_identities)
+    apply_domain_mapping(str(db_path), mapping_path=str(mapping_file), interactive=False, bh_identities=bh_identities, db_key="testkey")
 
-    conn = sqlite3.connect(str(db_path))
+    from pysqlcipher3 import dbapi2 as pysqlite3
+    conn = pysqlite3.connect(str(db_path))
+    conn.execute("PRAGMA key='testkey'")
     c = conn.cursor()
     c.execute("SELECT original_domain, domain, username FROM users ORDER BY id")
     users = c.fetchall()

@@ -1,8 +1,10 @@
-import sqlite3
+from pysqlcipher3 import dbapi2 as sqlite3
 import io
 import csv
 import json
 import os
+import sys
+import getpass
 from urllib.parse import urlparse, urljoin
 from flask import Flask, render_template, request, g, Response, session, redirect, url_for, flash
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -33,11 +35,47 @@ def get_secret_key():
 app.secret_key = get_secret_key()
 DATABASE = 'analysis.db'
 
+# Handle database key parsing at module level so it works with WSGI and `flask run`
+db_key = os.environ.get('ADPA_DB_KEY')
+if not db_key and not app.config.get('TESTING'):
+    print("=" * 60)
+    print("🔒 DATABASE ENCRYPTION KEY REQUIRED")
+    print("=" * 60)
+    print("The SQLite database is encrypted.")
+    print("Please enter the Database Encryption Key (or set the ADPA_DB_KEY environment variable).")
+    try:
+        db_key = getpass.getpass("Database Key: ")
+    except EOFError:
+        print("\nExiting...")
+        sys.exit(1)
+
+    if not db_key:
+        print("Error: A database key must be provided.")
+        sys.exit(1)
+
+    # Quick test to verify the key works
+    try:
+        conn = sqlite3.connect(DATABASE)
+        escaped_key = db_key.replace("'", "''")
+        conn.execute(f"PRAGMA key='{escaped_key}'")
+        # Trying to read the sqlite_master table will fail if the key is wrong
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        conn.close()
+    except sqlite3.DatabaseError:
+        print("\n❌ Error: Incorrect database key or the database file is corrupted/not encrypted properly.")
+        sys.exit(1)
+
+app.config['DB_KEY'] = db_key
+
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
         db_path = app.config.get('DATABASE', DATABASE)
+        db_key = app.config.get('DB_KEY')
         db = g._database = sqlite3.connect(db_path)
+        if db_key:
+            escaped_key = db_key.replace("'", "''")
+            db.execute(f"PRAGMA key='{escaped_key}'")
         db.row_factory = sqlite3.Row
     return db
 

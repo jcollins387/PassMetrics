@@ -12,10 +12,13 @@ def client():
     # Create an empty test database
     db_path = "test_analysis.db"
     app.config["DATABASE"] = db_path
+    app.config["DB_KEY"] = "testkey"
 
     with app.app_context():
         # Setup basic tables to allow tests to run
+        from pysqlcipher3 import dbapi2 as sqlite3
         conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA key='testkey'")
         c = conn.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -299,13 +302,14 @@ def test_get_db_creates_and_caches_connection():
         db2 = get_db()
 
         # Verify it returns a connection
-        assert isinstance(db1, sqlite3.Connection)
+        from pysqlcipher3 import dbapi2 as pysqlcipher3
+        assert isinstance(db1, pysqlcipher3.Connection)
 
         # Verify it caches the connection
         assert db1 is db2
 
         # Verify row_factory is set
-        assert db1.row_factory == sqlite3.Row
+        assert db1.row_factory == pysqlcipher3.Row
 
 
 def test_get_db_uses_config_path(client):
@@ -319,7 +323,7 @@ def test_get_db_uses_config_path(client):
         # We can mock sqlite3.connect just to assert the path argument
         import unittest.mock as mock
 
-        with mock.patch("sqlite3.connect") as mock_connect:
+        with mock.patch("app.sqlite3.connect") as mock_connect:
             mock_connect.return_value = mock.MagicMock()
             get_db()
             mock_connect.assert_called_once_with(expected_path)
@@ -336,7 +340,7 @@ def test_get_db_uses_fallback_path():
         try:
             import unittest.mock as mock
 
-            with mock.patch("sqlite3.connect") as mock_connect:
+            with mock.patch("app.sqlite3.connect") as mock_connect:
                 mock_connect.return_value = mock.MagicMock()
                 get_db()
                 # Should fall back to the global DATABASE variable which is 'analysis.db'
