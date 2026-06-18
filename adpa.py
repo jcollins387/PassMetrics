@@ -361,9 +361,11 @@ def parse_ntds(ntds_path: str, db_path: str, db_key: str):
     conn.close()
 
 
-def extract_bh_identities(bh_files: List[str]) -> set:
-    """Extracts a set of all unique (domain, username) combinations from Bloodhound files."""
-    identities = set()
+def extract_bh_mapping_data(bh_files: List[str]) -> tuple:
+    """Extracts valid FQDNs and user RID mappings from Bloodhound files."""
+    valid_fqdns = {}
+    bh_users_by_name = {}
+
     for bh_file in bh_files:
         with open(bh_file, "r", encoding="utf-8", errors="replace") as f:
             try:
@@ -372,28 +374,42 @@ def extract_bh_identities(bh_files: List[str]) -> set:
                 continue
 
             data_list = []
-            if "data" in data:
-                data_list = data["data"]
-            elif "users" in data:
-                data_list = data["users"]
-            else:
-                if isinstance(data, list):
-                    data_list = data
+            for key in ["data", "users", "domains", "computers", "groups", "ous"]:
+                if key in data:
+                    data_list.extend(data[key])
+            if not data_list and isinstance(data, list):
+                data_list = data
 
             for item in data_list:
                 item_type = item.get("type", item.get("Type", "")).upper()
-                props = item.get("Properties", {})
+                props = item.get("Properties", item.get("properties", {}))
+
+                if item_type == "DOMAIN":
+                    domain = props.get("name", props.get("domain", ""))
+                    if domain:
+                        valid_fqdns[domain.lower()] = domain
 
                 if item_type == "USER" or (not item_type and props.get("samaccountname")):
                     domain = props.get("domain", "")
-                    if domain:
-                        domain = domain.split(".")[0].lower()
                     samaccountname = props.get("samaccountname", "")
-                    if samaccountname:
-                        samaccountname = samaccountname.lower()
-                    if domain and samaccountname:
-                        identities.add((domain, samaccountname))
-    return identities
+                    object_id = item.get("ObjectIdentifier", item.get("objectid", props.get("objectid", "")))
+
+                    if domain:
+                        valid_fqdns[domain.lower()] = domain
+
+                    if samaccountname and domain and object_id:
+                        parts = object_id.split("-")
+                        if len(parts) >= 3 and parts[0].upper() == "S":
+                            try:
+                                rid = int(parts[-1])
+                                bh_users_by_name.setdefault(samaccountname.lower(), []).append({
+                                    "rid": rid,
+                                    "fqdn": domain
+                                })
+                            except ValueError:
+                                pass
+
+    return valid_fqdns, bh_users_by_name
 
 
 def _build_identifier_map(bh_files: List[str]) -> Dict[str, str]:
@@ -808,9 +824,9 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     conn.close()
 
 
-def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool, bh_identities: Optional[set] = None, db_key: str = None):
+def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool, bh_mapping_data: Optional[tuple] = None, db_key: str = None):
     # If neither mapping is provided, there is nothing to do.
-    if not mapping_path and not bh_identities:
+    if not mapping_path and not bh_mapping_data:
         return
 
     logging.info("Applying domain mappings...")
@@ -825,7 +841,7 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
         except Exception as e:
             logging.error(f"Failed to read domain mapping file: {e}")
             # If the mapping file fails and there are no BH identities, abort
-            if not bh_identities:
+            if not bh_mapping_data:
                 return
 
     conn = sqlite3.connect(db_path)
@@ -833,7 +849,7 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
         conn.execute(f"PRAGMA key='{db_key.replace("'", "''")}'")
     c = conn.cursor()
 
-    c.execute("SELECT id, domain, username FROM users")
+    c.execute("SELECT id, domain, username, rid FROM users")
     all_users = c.fetchall()
 
     # Pre-calculate a fast lookup set for existing combinations to prevent N+1 queries
@@ -848,12 +864,9 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
     updates = []
 
     # Optional prep for Bloodhound Auto Mapping
-    bh_identities = bh_identities or set()
-    bh_identities_by_user = {}
-    for dom_lower, user_lower in bh_identities:
-        bh_identities_by_user.setdefault(user_lower, []).append(dom_lower)
+    valid_fqdns, bh_users_by_name = bh_mapping_data if bh_mapping_data else ({}, {})
 
-    for user_id, orig_domain, base_username in all_users:
+    for user_id, orig_domain, base_username, rid in all_users:
         orig_domain_lower = orig_domain.lower()
         base_username_lower = base_username.lower()
         final_domain = orig_domain
@@ -861,26 +874,19 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
         needs_json_mapping = True
 
         # Phase 1: Bloodhound Automatic Mapping
-        if bh_identities:
-            # First Check: Strict match (does this domain\username already exist in BH?)
-            if (orig_domain_lower, base_username_lower) in bh_identities:
-                # Exact match found, no remapping required
+        if valid_fqdns or bh_users_by_name:
+            # Check 1: Does original domain exactly match an FQDN extracted from BH?
+            if orig_domain_lower in valid_fqdns:
+                final_domain = valid_fqdns[orig_domain_lower]
                 needs_json_mapping = False
             else:
-                # Second Check: Fallback match based on username only
-                potential_bh_domains = bh_identities_by_user.get(base_username_lower, [])
-                if potential_bh_domains:
-                    valid_candidates = []
-                    for pot_dom in potential_bh_domains:
-                        # Check if this potential domain\user combo already exists in NTDS
-                        if (pot_dom, base_username_lower) not in existing_ntds_combos:
-                            valid_candidates.append(pot_dom)
-
-                    if len(valid_candidates) == 1:
-                        # Exactly one valid candidate that doesn't conflict with existing NTDS
-                        final_domain = valid_candidates[0]
+                # Check 2: Match by username and RID
+                potential_bh_users = bh_users_by_name.get(base_username_lower, [])
+                for bh_user in potential_bh_users:
+                    if bh_user["rid"] == rid:
+                        final_domain = bh_user["fqdn"]
                         needs_json_mapping = False
-                    # If 0 or >1 valid candidates, it's ambiguous or blocked. Fallback to JSON.
+                        break
 
         # Phase 2: JSON Fallback Mapping
         if needs_json_mapping and orig_domain_lower in mapping_cache:
@@ -936,7 +942,7 @@ def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive:
                             print("Please enter a number.")
 
         # Ensure we maintain the case-sensitive string from BH if we got it from BH mapping,
-        # but our bh_identities only have lowercase right now. If we changed it via BH mapping,
+        # but our bh_mapping_data only have lowercase right now. If we changed it via BH mapping,
         # final_domain will be lowercase. That's OK since the codebase uses lowercase comparisons later.
 
         if final_domain != orig_domain:
@@ -1085,12 +1091,12 @@ def main():
     parse_ntds(args.ntds, db_path, db_key)
     logging.info("Parsed users and hashes from NTDS into DB.")
 
-    bh_identities = None
+    bh_mapping_data = None
     if args.bloodhound:
         logging.info("Extracting Bloodhound identities for automatic domain mapping...")
-        bh_identities = extract_bh_identities(args.bloodhound)
+        bh_mapping_data = extract_bh_mapping_data(args.bloodhound)
 
-    apply_domain_mapping(db_path, args.domain_mapping, args.interactive, bh_identities, db_key)
+    apply_domain_mapping(db_path, args.domain_mapping, args.interactive, bh_mapping_data, db_key)
     logging.info("Applied domain mappings.")
 
     if args.bloodhound:
