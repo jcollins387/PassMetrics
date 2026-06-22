@@ -178,45 +178,47 @@ def dashboard():
     db = get_db()
     c = db.cursor()
 
-    c.execute("SELECT COUNT(*) FROM users")
-    total_accounts = c.fetchone()[0]
+    c.execute("""
+        SELECT
+            COUNT(*),
+            SUM(CASE WHEN kerberoastable = 1 AND enabled = 1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN asreproastable = 1 AND enabled = 1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN pwdneverexpires = 1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN passwordnotreqd = 1 THEN 1 ELSE 0 END)
+        FROM users
+    """)
+    row = c.fetchone()
+    total_accounts = row[0] or 0
+    total_kerberoastable = row[1] or 0
+    total_asreproastable = row[2] or 0
+    total_pwdneverexpires = row[3] or 0
+    total_passwordnotreqd = row[4] or 0
 
-    c.execute("SELECT COUNT(*) FROM hashes WHERE is_history = 0")
-    total_passwords = c.fetchone()[0]
+    c.execute("""
+        SELECT
+            SUM(CASE WHEN is_history = 0 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN is_history = 0 AND cracked_password IS NOT NULL THEN 1 ELSE 0 END)
+        FROM hashes
+    """)
+    row = c.fetchone()
+    total_passwords = row[0] or 0
+    total_cracked = row[1] or 0
 
-    c.execute("SELECT COUNT(*) FROM hashes WHERE is_history = 0 AND cracked_password IS NOT NULL")
-    total_cracked = c.fetchone()[0]
+    c.execute("""
+        SELECT
+            SUM(CASE WHEN u.kerberoastable = 1 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN u.asreproastable = 1 THEN 1 ELSE 0 END)
+        FROM users u
+        JOIN hashes h ON u.id = h.user_id
+        WHERE u.enabled = 1 AND h.is_history = 0 AND h.cracked_password IS NOT NULL
+          AND (u.kerberoastable = 1 OR u.asreproastable = 1)
+    """)
+    row = c.fetchone()
+    cracked_kerberoastable = row[0] or 0
+    cracked_asreproastable = row[1] or 0
 
     c.execute("SELECT COUNT(DISTINCT user_id) FROM policy_violations")
     total_policy_violations = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM users WHERE kerberoastable = 1 AND enabled = 1")
-    total_kerberoastable = c.fetchone()[0]
-
-    c.execute("""
-        SELECT COUNT(*)
-        FROM users u
-        JOIN hashes h ON u.id = h.user_id
-        WHERE u.kerberoastable = 1 AND u.enabled = 1 AND h.is_history = 0 AND h.cracked_password IS NOT NULL
-    """)
-    cracked_kerberoastable = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM users WHERE asreproastable = 1 AND enabled = 1")
-    total_asreproastable = c.fetchone()[0]
-
-    c.execute("""
-        SELECT COUNT(*)
-        FROM users u
-        JOIN hashes h ON u.id = h.user_id
-        WHERE u.asreproastable = 1 AND u.enabled = 1 AND h.is_history = 0 AND h.cracked_password IS NOT NULL
-    """)
-    cracked_asreproastable = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM users WHERE pwdneverexpires = 1")
-    total_pwdneverexpires = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM users WHERE passwordnotreqd = 1")
-    total_passwordnotreqd = c.fetchone()[0]
 
     c.execute("SELECT value FROM config WHERE key = 'high_value_groups'")
     row = c.fetchone()
@@ -231,27 +233,19 @@ def dashboard():
 
         c.execute(
             f"""
-            SELECT COUNT(DISTINCT u.id)
+            SELECT
+                COUNT(DISTINCT u.id),
+                COUNT(DISTINCT CASE WHEN h.is_history = 0 AND h.cracked_password IS NOT NULL THEN u.id END)
             FROM users u
             JOIN user_groups ug ON u.id = ug.user_id
+            LEFT JOIN hashes h ON u.id = h.user_id
             WHERE lower(ug.group_name) IN ({placeholders})
         """,
             params,
         )
-        total_high_value = c.fetchone()[0]
-
-        c.execute(
-            f"""
-            SELECT COUNT(DISTINCT u.id)
-            FROM users u
-            JOIN hashes h ON u.id = h.user_id
-            JOIN user_groups ug ON u.id = ug.user_id
-            WHERE h.is_history = 0 AND h.cracked_password IS NOT NULL
-            AND lower(ug.group_name) IN ({placeholders})
-        """,
-            params,
-        )
-        cracked_high_value = c.fetchone()[0]
+        row = c.fetchone()
+        total_high_value = row[0] or 0
+        cracked_high_value = row[1] or 0
 
     c.execute("""
         SELECT cracked_password, COUNT(*) as count
