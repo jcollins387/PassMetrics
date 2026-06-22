@@ -96,6 +96,13 @@ def query_db(query, args=(), one=False):
     return (rv[0] if rv else None) if one else rv
 
 
+def get_pagination_args():
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 50, type=int)
+    offset = (page - 1) * per_page
+    return page, per_page, offset
+
+
 @app.before_request
 def require_login():
     allowed_routes = ["login", "static"]
@@ -499,9 +506,7 @@ def lengths():
 
 @app.route("/shared")
 def shared():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    offset = (page - 1) * per_page
+    page, per_page, offset = get_pagination_args()
 
     db = get_db()
     c = db.cursor()
@@ -522,9 +527,7 @@ def shared():
 
 @app.route("/lm_hashes")
 def lm_hashes():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    offset = (page - 1) * per_page
+    page, per_page, offset = get_pagination_args()
 
     db = get_db()
     c = db.cursor()
@@ -547,9 +550,7 @@ def lm_hashes():
 
 @app.route("/policy")
 def policy():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    offset = (page - 1) * per_page
+    page, per_page, offset = get_pagination_args()
 
     db = get_db()
     c = db.cursor()
@@ -571,10 +572,8 @@ def policy():
 
 @app.route("/high_value")
 def high_value():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
+    page, per_page, offset = get_pagination_args()
     group_filter = request.args.get("group", "default")
-    offset = (page - 1) * per_page
 
     db = get_db()
     c = db.cursor()
@@ -620,9 +619,7 @@ def high_value():
 
 @app.route("/kerberoastable")
 def kerberoastable():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    offset = (page - 1) * per_page
+    page, per_page, offset = get_pagination_args()
 
     db = get_db()
     c = db.cursor()
@@ -645,9 +642,7 @@ def kerberoastable():
 
 @app.route("/asreproastable")
 def asreproastable():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    offset = (page - 1) * per_page
+    page, per_page, offset = get_pagination_args()
 
     db = get_db()
     c = db.cursor()
@@ -670,9 +665,7 @@ def asreproastable():
 
 @app.route("/flags")
 def flags():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    offset = (page - 1) * per_page
+    page, per_page, offset = get_pagination_args()
 
     db = get_db()
     c = db.cursor()
@@ -704,9 +697,7 @@ def mappings():
             c.execute("UPDATE users SET domain = ? WHERE id = ?", (new_domain, user_id))
             db.commit()
 
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    offset = (page - 1) * per_page
+    page, per_page, offset = get_pagination_args()
     search = request.args.get("search", "")
 
     if search:
@@ -751,9 +742,7 @@ def mappings():
 
 @app.route("/history")
 def history():
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
-    offset = (page - 1) * per_page
+    page, per_page, offset = get_pagination_args()
 
     db = get_db()
     c = db.cursor()
