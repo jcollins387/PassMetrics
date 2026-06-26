@@ -16,6 +16,13 @@ app = Flask(__name__)
 limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
 
 
+def sanitize_csv_field(field):
+    """Sanitize CSV fields to prevent formula injection."""
+    if isinstance(field, str) and field and field[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return f"'{field}"
+    return field
+
+
 def is_safe_url(target):
     ref_url = urlparse(request.host_url)
     test_url = urlparse(urljoin(request.host_url, target))
@@ -367,8 +374,8 @@ def export_csv():
     cw.writerow(headers)
 
     for row in rows:
-        domain = row["domain"]
-        username = row["username"]
+        domain = sanitize_csv_field(row["domain"])
+        username = sanitize_csv_field(row["username"])
         pnr = "x" if row["passwordnotreqd"] else ""
         pne = "x" if row["pwdneverexpires"] else ""
         kerb = "x" if row["kerberoastable"] else ""
@@ -407,10 +414,14 @@ def export_reset_csv():
 
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(["Domain", "Username", "Password", "Needs Reset"])
+    cw.writerow(["Domain", "Username", "Password", "Password Length", "Needs Reset"])
 
     for row in rows:
-        cw.writerow([row["domain"], row["username"], row["cracked_password"], "TRUE"])
+        domain = sanitize_csv_field(row["domain"])
+        username = sanitize_csv_field(row["username"])
+        password = sanitize_csv_field(row["cracked_password"])
+        pw_len = len(row["cracked_password"]) if row["cracked_password"] else 0
+        cw.writerow([domain, username, password, pw_len, "TRUE"])
 
     output = si.getvalue()
     return Response(output, mimetype="text/csv", headers={"Content-disposition": "attachment; filename=accounts_needing_reset.csv"})
@@ -432,11 +443,14 @@ def export_shared_csv():
 
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(["Domain", "Username", "Password", "Reuse Count"])
+    cw.writerow(["Domain", "Username", "Password", "Password Length", "Reuse Count"])
 
     for row in rows:
-        pwd = row["cracked_password"] if row["cracked_password"] else ""
-        cw.writerow([row["domain"], row["username"], pwd, row["reuse_count"]])
+        domain = sanitize_csv_field(row["domain"])
+        username = sanitize_csv_field(row["username"])
+        pwd = sanitize_csv_field(row["cracked_password"]) if row["cracked_password"] else ""
+        pw_len = len(row["cracked_password"]) if row["cracked_password"] else 0
+        cw.writerow([domain, username, pwd, pw_len, row["reuse_count"]])
 
     output = si.getvalue()
     return Response(output, mimetype="text/csv", headers={"Content-disposition": "attachment; filename=shared_passwords.csv"})
@@ -448,7 +462,7 @@ def export_length_csv():
     c = db.cursor()
 
     c.execute("""
-        SELECT u.domain, u.username, pv.reason, pv.policy_name
+        SELECT u.domain, u.username, pv.reason, pv.policy_name, h.cracked_password
         FROM users u
         LEFT JOIN hashes h ON u.id = h.user_id AND h.is_history = 0 AND h.cracked_password IS NOT NULL
         LEFT JOIN policy_violations pv ON u.id = pv.user_id
@@ -459,11 +473,12 @@ def export_length_csv():
 
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(["Domain", "Username", "Length Violation", "Requirement", "Policy Name"])
+    cw.writerow(["Domain", "Username", "Actual Password Length", "Length Violation", "Requirement", "Policy Name"])
 
     for row in rows:
-        domain = row["domain"]
-        username = row["username"]
+        domain = sanitize_csv_field(row["domain"])
+        username = sanitize_csv_field(row["username"])
+        pw_len = len(row["cracked_password"]) if row["cracked_password"] else 0
         reason = row["reason"] or ""
         policy_name = row["policy_name"] or ""
         reason_list = [r.strip() for r in reason.split(",")] if reason else []
@@ -480,7 +495,7 @@ def export_length_csv():
                 is_violation = "TRUE"
                 break
 
-        cw.writerow([domain, username, is_violation, length_req, policy_name])
+        cw.writerow([domain, username, pw_len, is_violation, length_req, policy_name])
 
     output = si.getvalue()
     return Response(output, mimetype="text/csv", headers={"Content-disposition": "attachment; filename=length_violations.csv"})
