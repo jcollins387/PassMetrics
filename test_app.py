@@ -17,6 +17,7 @@ def client():
     with app.app_context():
         # Setup basic tables to allow tests to run
         from pysqlcipher3 import dbapi2 as sqlite3
+
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA key='testkey'")
         c = conn.cursor()
@@ -198,7 +199,7 @@ def test_mappings_search_injection(client):
 
     # Test wildcard escape (DoS protection)
     # '%' and '_' should be treated as literal characters, not wildcards
-    response = client.get('/mappings?search=%')
+    response = client.get("/mappings?search=%")
     assert response.status_code == 200
     # Since no username contains literal '%', it shouldn't match everything
     assert b"test_user" not in response.data
@@ -211,18 +212,18 @@ def test_mappings_search_injection(client):
         c.execute("INSERT INTO users (domain, username, original_domain) VALUES ('test_domain', 'user_name', 'test_orig')")
         db.commit()
 
-    response = client.get('/mappings?search=%')
+    response = client.get("/mappings?search=%")
     assert response.status_code == 200
     assert b"user%name" in response.data
     assert b"test_user" not in response.data
 
-    response = client.get('/mappings?search=_')
+    response = client.get("/mappings?search=_")
     assert response.status_code == 200
     assert b"user_name" in response.data
     assert b"test_user" in response.data  # 'test_user' contains an underscore
-    assert b"other_user" in response.data # 'other_user' contains an underscore
+    assert b"other_user" in response.data  # 'other_user' contains an underscore
 
-    response = client.get('/mappings?search=\\')
+    response = client.get("/mappings?search=\\")
     assert response.status_code == 200
 
 
@@ -303,6 +304,7 @@ def test_get_db_creates_and_caches_connection():
 
         # Verify it returns a connection
         from pysqlcipher3 import dbapi2 as pysqlcipher3
+
         assert isinstance(db1, pysqlcipher3.Connection)
 
         # Verify it caches the connection
@@ -481,15 +483,21 @@ def test_kerberoastable_route(client):
         c.execute("DELETE FROM hashes")
 
         # User 1: kerberoastable=1, enabled=1 (Should appear)
-        c.execute("INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (1, 'test_domain1', 'test_user1', 'test_orig1', 1, 1)")
+        c.execute(
+            "INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (1, 'test_domain1', 'test_user1', 'test_orig1', 1, 1)"
+        )
         c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (1, 0, 'cracked_pass1')")
 
         # User 2: kerberoastable=1, enabled=0 (Should NOT appear)
-        c.execute("INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (2, 'test_domain2', 'test_user2', 'test_orig2', 1, 0)")
+        c.execute(
+            "INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (2, 'test_domain2', 'test_user2', 'test_orig2', 1, 0)"
+        )
         c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (2, 0, 'cracked_pass2')")
 
         # User 3: kerberoastable=0, enabled=1 (Should NOT appear)
-        c.execute("INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (3, 'test_domain3', 'test_user3', 'test_orig3', 0, 1)")
+        c.execute(
+            "INSERT INTO users (id, domain, username, original_domain, kerberoastable, enabled) VALUES (3, 'test_domain3', 'test_user3', 'test_orig3', 0, 1)"
+        )
         c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (3, 0, 'cracked_pass3')")
 
         db.commit()
@@ -524,15 +532,21 @@ def test_asreproastable_route(client):
         c.execute("DELETE FROM hashes")
 
         # User 1: asreproastable=1, enabled=1 (Should appear)
-        c.execute("INSERT INTO users (id, domain, username, original_domain, asreproastable, enabled) VALUES (1, 'test_domain1', 'test_user1', 'test_orig1', 1, 1)")
+        c.execute(
+            "INSERT INTO users (id, domain, username, original_domain, asreproastable, enabled) VALUES (1, 'test_domain1', 'test_user1', 'test_orig1', 1, 1)"
+        )
         c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (1, 0, 'cracked_pass1')")
 
         # User 2: asreproastable=1, enabled=0 (Should NOT appear)
-        c.execute("INSERT INTO users (id, domain, username, original_domain, asreproastable, enabled) VALUES (2, 'test_domain2', 'test_user2', 'test_orig2', 1, 0)")
+        c.execute(
+            "INSERT INTO users (id, domain, username, original_domain, asreproastable, enabled) VALUES (2, 'test_domain2', 'test_user2', 'test_orig2', 1, 0)"
+        )
         c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (2, 0, 'cracked_pass2')")
 
         # User 3: asreproastable=0, enabled=1 (Should NOT appear)
-        c.execute("INSERT INTO users (id, domain, username, original_domain, asreproastable, enabled) VALUES (3, 'test_domain3', 'test_user3', 'test_orig3', 0, 1)")
+        c.execute(
+            "INSERT INTO users (id, domain, username, original_domain, asreproastable, enabled) VALUES (3, 'test_domain3', 'test_user3', 'test_orig3', 0, 1)"
+        )
         c.execute("INSERT INTO hashes (user_id, is_history, cracked_password) VALUES (3, 0, 'cracked_pass3')")
 
         db.commit()
@@ -555,6 +569,7 @@ def test_asreproastable_route(client):
     assert b"test_domain3" not in response.data
     assert b"test_user3" not in response.data
     assert b"cracked_pass3" not in response.data
+
 
 def test_logout(client):
     with client.session_transaction() as sess:
@@ -587,12 +602,8 @@ def test_change_password_post_incorrect_current(client):
         sess["user_id"] = 1
     response = client.post(
         "/change_password",
-        data={
-            "current_password": "wrongpassword",
-            "new_password": "newpassword123",
-            "confirm_password": "newpassword123"
-        },
-        follow_redirects=True
+        data={"current_password": "wrongpassword", "new_password": "newpassword123", "confirm_password": "newpassword123"},
+        follow_redirects=True,
     )
     assert b"Incorrect current password" in response.data
 
@@ -602,12 +613,8 @@ def test_change_password_post_mismatch_new(client):
         sess["user_id"] = 1
     response = client.post(
         "/change_password",
-        data={
-            "current_password": "password123",
-            "new_password": "newpassword123",
-            "confirm_password": "newpassword456"
-        },
-        follow_redirects=True
+        data={"current_password": "password123", "new_password": "newpassword123", "confirm_password": "newpassword456"},
+        follow_redirects=True,
     )
     assert b"New passwords do not match" in response.data
 
@@ -617,12 +624,8 @@ def test_change_password_post_short_new(client):
         sess["user_id"] = 1
     response = client.post(
         "/change_password",
-        data={
-            "current_password": "password123",
-            "new_password": "short",
-            "confirm_password": "short"
-        },
-        follow_redirects=True
+        data={"current_password": "password123", "new_password": "short", "confirm_password": "short"},
+        follow_redirects=True,
     )
     assert b"Password must be at least 8 characters long" in response.data
 
@@ -638,31 +641,30 @@ def test_change_password_post_success(client):
 
     response = client.post(
         "/change_password",
-        data={
-            "current_password": "password123",
-            "new_password": "newpassword123",
-            "confirm_password": "newpassword123"
-        },
-        follow_redirects=True
+        data={"current_password": "password123", "new_password": "newpassword123", "confirm_password": "newpassword123"},
+        follow_redirects=True,
     )
 
     with client.session_transaction() as sess:
-        assert "Password changed successfully" in [msg[1] for msg in sess.get('_flashes', [])]
+        assert "Password changed successfully" in [msg[1] for msg in sess.get("_flashes", [])]
 
     # Since dashboard.html doesn't seem to render flash messages, we check if it redirected to the dashboard correctly
     assert response.status_code == 200
-    assert b"Password Analysis Report" in response.data # check if we are on dashboard
+    assert b"Password Analysis Report" in response.data  # check if we are on dashboard
 
     with client.application.app_context():
         from werkzeug.security import check_password_hash
+
         user = query_db("SELECT * FROM web_users WHERE id = 1", one=True)
         assert user["must_change_password"] == 0
         assert check_password_hash(user["password_hash"], "newpassword123")
+
 
 def test_export_reset_csv(client):
     # Setup test data
     with client.application.app_context():
         import app
+
         db = app.get_db()
         c = db.cursor()
         c.execute("INSERT INTO users (id, domain, username, enabled) VALUES (1, 'TEST', 'user1', 1)")
@@ -675,15 +677,15 @@ def test_export_reset_csv(client):
         db.commit()
 
     with client.session_transaction() as sess:
-        sess['user_id'] = 1
+        sess["user_id"] = 1
 
-    response = client.get('/export_reset_csv')
+    response = client.get("/export_reset_csv")
     assert response.status_code == 200
-    assert response.headers['Content-disposition'] == 'attachment; filename=accounts_needing_reset.csv'
+    assert response.headers["Content-disposition"] == "attachment; filename=accounts_needing_reset.csv"
 
-    csv_data = response.data.decode('utf-8')
-    assert "Domain,Username,Password,Needs Reset\r\n" in csv_data
-    assert "TEST,user1,password123,TRUE\r\n" in csv_data
+    csv_data = response.data.decode("utf-8")
+    assert "Domain,Username,Password,Password Length,Needs Reset\r\n" in csv_data
+    assert "TEST,user1,password123,11,TRUE\r\n" in csv_data
     assert "TEST,user2" not in csv_data
 
 
@@ -691,6 +693,7 @@ def test_export_shared_csv(client):
     # Setup test data
     with client.application.app_context():
         import app
+
         db = app.get_db()
         c = db.cursor()
         c.execute("INSERT INTO users (id, domain, username, enabled) VALUES (1, 'TEST', 'user1', 1)")
@@ -706,19 +709,76 @@ def test_export_shared_csv(client):
         # Let's insert uncracked shared password
         c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (3, 3, 'hash2', NULL, 0)")
 
-        c.execute("INSERT INTO shared_hashes (nt_hash, cracked_password, count, shared_by) VALUES ('hash1', 'password123', 2, 'TEST\\user1, TEST\\user2')")
-        c.execute("INSERT INTO shared_hashes (nt_hash, cracked_password, count, shared_by) VALUES ('hash2', NULL, 2, 'TEST\\user3, TEST\\user4')")
+        c.execute(
+            "INSERT INTO shared_hashes (nt_hash, cracked_password, count, shared_by) VALUES ('hash1', 'password123', 2, 'TEST\\user1, TEST\\user2')"
+        )
+        c.execute(
+            "INSERT INTO shared_hashes (nt_hash, cracked_password, count, shared_by) VALUES ('hash2', NULL, 2, 'TEST\\user3, TEST\\user4')"
+        )
         db.commit()
 
     with client.session_transaction() as sess:
-        sess['user_id'] = 1
+        sess["user_id"] = 1
 
-    response = client.get('/export_shared_csv')
+    response = client.get("/export_shared_csv")
     assert response.status_code == 200
-    assert response.headers['Content-disposition'] == 'attachment; filename=shared_passwords.csv'
+    assert response.headers["Content-disposition"] == "attachment; filename=shared_passwords.csv"
 
-    csv_data = response.data.decode('utf-8')
-    assert "Domain,Username,Password,Reuse Count\r\n" in csv_data
-    assert "TEST,user1,password123,2\r\n" in csv_data
-    assert "TEST,user2,password123,2\r\n" in csv_data
-    assert "TEST,user3,,2\r\n" in csv_data
+    csv_data = response.data.decode("utf-8")
+    assert "Domain,Username,Password,Password Length,Reuse Count\r\n" in csv_data
+    assert "TEST,user1,password123,11,2\r\n" in csv_data
+    assert "TEST,user2,password123,11,2\r\n" in csv_data
+    assert "TEST,user3,,0,2\r\n" in csv_data
+
+
+def test_csv_injection_sanitization(client):
+    with client.application.app_context():
+        import app
+
+        db = app.get_db()
+        c = db.cursor()
+        # Insert a user with a dangerous username
+        c.execute(
+            "INSERT INTO users (id, domain, username, enabled, passwordnotreqd, pwdneverexpires, kerberoastable, asreproastable) VALUES (100, 'TEST', '=cmd|'' /C calc''!A0', 1, 0, 0, 0, 0)"
+        )
+        c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (100, 100, 'hash100', '+12345', 0)")
+        db.commit()
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = 100
+
+    # Test export_csv
+    response = client.get("/export_csv")
+    assert response.status_code == 200
+    csv_data = response.data.decode("utf-8")
+    assert "'=cmd|' /C calc'!A0" in csv_data
+
+    # Test export_reset_csv
+    response = client.get("/export_reset_csv")
+    assert response.status_code == 200
+    csv_data = response.data.decode("utf-8")
+    assert "'+12345" in csv_data
+
+
+def test_export_length_csv(client):
+    # Setup test data
+    with client.application.app_context():
+        import app
+
+        db = app.get_db()
+        c = db.cursor()
+        c.execute("INSERT INTO users (id, domain, username, enabled) VALUES (1, 'TEST', 'user1', 1)")
+        c.execute("INSERT INTO hashes (id, user_id, nt_hash, cracked_password, is_history) VALUES (1, 1, 'hash1', 'password123', 0)")
+        c.execute("INSERT INTO policy_violations (user_id, policy_name, reason) VALUES (1, 'Test Policy', 'Length < 14')")
+        db.commit()
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = 1
+
+    response = client.get("/export_length_csv")
+    assert response.status_code == 200
+    assert response.headers["Content-disposition"] == "attachment; filename=length_violations.csv"
+
+    csv_data = response.data.decode("utf-8")
+    assert "Domain,Username,Actual Password Length,Length Violation,Requirement,Policy Name\r\n" in csv_data
+    assert "TEST,user1,11,TRUE,< 14,Test Policy\r\n" in csv_data
