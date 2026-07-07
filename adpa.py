@@ -402,10 +402,7 @@ def extract_bh_mapping_data(bh_files: List[str]) -> tuple:
                         if len(parts) >= 3 and parts[0].upper() == "S":
                             try:
                                 rid = int(parts[-1])
-                                bh_users_by_name.setdefault(samaccountname.lower(), []).append({
-                                    "rid": rid,
-                                    "fqdn": domain
-                                })
+                                bh_users_by_name.setdefault(samaccountname.lower(), []).append({"rid": rid, "fqdn": domain})
                             except ValueError:
                                 pass
 
@@ -736,10 +733,8 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
             matched = False
 
             # Check groups
-            for g in p["match_groups"]:
-                if g in user_groups_lower:
-                    matched = True
-                    break
+            if user_groups_lower & p["match_groups"]:
+                matched = True
 
             # Check OUs (both in DN as an OU substring or directly matching a group name)
             if not matched:
@@ -824,7 +819,9 @@ def calculate_metrics(db_path: str, policy: Dict, redact: bool, enabled_only: bo
     conn.close()
 
 
-def apply_domain_mapping(db_path: str, mapping_path: Optional[str], interactive: bool, bh_mapping_data: Optional[tuple] = None, db_key: str = None):
+def apply_domain_mapping(
+    db_path: str, mapping_path: Optional[str], interactive: bool, bh_mapping_data: Optional[tuple] = None, db_key: str = None
+):
     # If neither mapping is provided, there is nothing to do.
     if not mapping_path and not bh_mapping_data:
         return
