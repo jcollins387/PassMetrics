@@ -485,25 +485,31 @@ def export_length_csv():
     cw = csv.writer(si)
     cw.writerow(["Domain", "Username", "Actual Password Length", "Length Violation", "Requirement", "Policy Name"])
 
+    reason_cache = {}
+
     for row in rows:
         domain = sanitize_csv_field(row["domain"])
         username = sanitize_csv_field(row["username"])
         pw_len = len(row["cracked_password"]) if row["cracked_password"] else 0
         reason = row["reason"] or ""
         policy_name = row["policy_name"] or ""
-        reason_list = [r.strip() for r in reason.split(",")] if reason else []
 
-        length_req = ""
-        is_violation = ""
-        for r in reason_list:
-            if r.lower().startswith("length"):
-                parts = r.split(" ", 1)
-                if len(parts) > 1:
-                    length_req = parts[1]
-                else:
-                    length_req = r
-                is_violation = "TRUE"
-                break
+        if reason not in reason_cache:
+            reason_list = [r.strip() for r in reason.split(",")] if reason else []
+            length_req = ""
+            is_violation = ""
+            for r in reason_list:
+                if r.lower().startswith("length"):
+                    parts = r.split(" ", 1)
+                    if len(parts) > 1:
+                        length_req = parts[1]
+                    else:
+                        length_req = r
+                    is_violation = "TRUE"
+                    break
+            reason_cache[reason] = (is_violation, length_req)
+
+        is_violation, length_req = reason_cache[reason]
 
         cw.writerow([domain, username, pw_len, is_violation, length_req, policy_name])
 
