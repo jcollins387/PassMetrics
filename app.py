@@ -373,6 +373,15 @@ def export_csv():
     cw = csv.writer(si)
     cw.writerow(headers)
 
+    # Pre-cache dynamic columns for each reason to avoid redundant iteration
+    cached_violation_columns = {}
+    for reason, r_types in parsed_reasons.items():
+        cached_violation_columns[reason] = ["x" if vt in r_types else "" for vt in violation_types]
+
+    empty_tail = [""] * len(violation_types)
+    cached_violation_columns[None] = empty_tail
+    cached_violation_columns[""] = empty_tail
+
     for row in rows:
         domain = sanitize_csv_field(row["domain"])
         username = sanitize_csv_field(row["username"])
@@ -384,13 +393,14 @@ def export_csv():
         csv_row = [domain, username, pnr, pne, kerb, asrep]
 
         reason = row["reason"]
-        row_violation_types = parsed_reasons.get(reason, set()) if reason else set()
 
-        for vt in violation_types:
-            if vt in row_violation_types:
-                csv_row.append("x")
-            else:
-                csv_row.append("")
+        tail = cached_violation_columns.get(reason)
+        if tail is None:
+            # Fallback for unexpected reasons
+            row_violation_types = parsed_reasons.get(reason, set()) if reason else set()
+            tail = ["x" if vt in row_violation_types else "" for vt in violation_types]
+
+        csv_row.extend(tail)
 
         cw.writerow(csv_row)
 
@@ -722,7 +732,8 @@ def mappings():
         query_params = [search_term, search_term, search_term]
 
         c.execute(
-            "SELECT COUNT(*) FROM users u WHERE u.original_domain LIKE ? ESCAPE '\\' OR u.domain LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\'",
+            "SELECT COUNT(*) FROM users u WHERE u.original_domain LIKE ? ESCAPE '\\' "
+            "OR u.domain LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\'",
             query_params,
         )
         total_users = c.fetchone()[0]
